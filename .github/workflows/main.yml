@@ -28,7 +28,7 @@ jobs:
                 run: dotnet build CatCore.Shared --configuration Release
     catcore:
         name: CatCore
-        runs-on: ubuntu-latest
+        runs-on: windows-latest
         needs: catcore-shared
         steps:
             -   uses: actions/checkout@v3
