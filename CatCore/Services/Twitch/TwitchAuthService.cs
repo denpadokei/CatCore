@@ -189,10 +189,10 @@ namespace CatCore.Services.Twitch
 
 				if (!responseMessage.IsSuccessStatusCode)
 				{
+					_logger.Warning($"Exchanging authorization code for credentials resulted in non-success status code: {responseMessage.StatusCode}");
 					return;
 				}
 				var contentString = responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
-				_logger.Debug($"Received response from CatCore auth server: {contentString}");
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
 
 				var newCredentials = new TwitchCredentials(authorizationResponse);
