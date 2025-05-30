@@ -6,7 +6,7 @@ name: Build and deploy dotnet core app to Azure Function App - CatCoreAPI
 on:
   push:
     branches:
-      - main
+      - denpa-dev
   workflow_dispatch:
 
 env:
