@@ -29,6 +29,7 @@ namespace CatCore.Services.Twitch
 		public event Action<string, ChannelFollowEvent>? OnChannelFollow;
 		public event Action<string, ChannelSubscribeEvent>? OnChannelSubscribe;
 		public event Action<string, ChannelPointsRedeemEvent>? OnChannelPointsRedeem;
+		public event Action<string, ChannelPredictionBeginEvent>? OnPredictionBegin;
 
 		public TwitchEventSubWebSocketAgent(
 			ILogger logger,
@@ -159,6 +160,16 @@ namespace CatCore.Services.Twitch
 									if (data != null)
 									{
 										OnChannelPointsRedeem?.Invoke(_channelId, data);
+									}
+
+									break;
+								}
+							case "channel.prediction.begin":
+								{
+									var data = eventData.Deserialize<ChannelPredictionBeginEvent>();
+									if (data != null)
+									{
+										OnPredictionBegin?.Invoke(_channelId, data);
 									}
 
 									break;
