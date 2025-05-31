@@ -15,19 +15,21 @@ namespace CatCore.Services.Twitch
 		private readonly ITwitchAuthService _twitchAuthService;
 		private readonly ITwitchIrcService _twitchIrcService;
 		private readonly ITwitchPubSubServiceManager _twitchPubSubServiceManager;
+		private readonly ITwitchEventSubServiceManager _twitchEventSubServiceManager;
 		private readonly ITwitchHelixApiService _twitchHelixApiService;
 		private readonly ITwitchRoomStateTrackerService _twitchRoomStateTrackerService;
 		private readonly ITwitchUserStateTrackerService _twitchUserStateTrackerService;
 		private readonly ITwitchChannelManagementService _twitchChannelManagementService;
 
 		internal TwitchService(ILogger logger, ITwitchAuthService twitchAuthService, ITwitchIrcService twitchIrcService, ITwitchPubSubServiceManager twitchPubSubServiceManager,
-			ITwitchHelixApiService twitchHelixApiService, ITwitchRoomStateTrackerService twitchRoomStateTrackerService, ITwitchUserStateTrackerService twitchUserStateTrackerService,
-			ITwitchChannelManagementService twitchChannelManagementService)
+			ITwitchEventSubServiceManager twitchEventSubServiceManager, ITwitchHelixApiService twitchHelixApiService, ITwitchRoomStateTrackerService twitchRoomStateTrackerService,
+			ITwitchUserStateTrackerService twitchUserStateTrackerService, ITwitchChannelManagementService twitchChannelManagementService)
 		{
 			_logger = logger;
 			_twitchAuthService = twitchAuthService;
 			_twitchIrcService = twitchIrcService;
 			_twitchPubSubServiceManager = twitchPubSubServiceManager;
+			_twitchEventSubServiceManager = twitchEventSubServiceManager;
 			_twitchHelixApiService = twitchHelixApiService;
 			_twitchRoomStateTrackerService = twitchRoomStateTrackerService;
 			_twitchUserStateTrackerService = twitchUserStateTrackerService;
@@ -57,6 +59,7 @@ namespace CatCore.Services.Twitch
 
 			await _twitchIrcService.Start();
 			await _twitchPubSubServiceManager.Start();
+			await _twitchEventSubServiceManager.Start();
 		}
 
 		async Task IPlatformService<ITwitchService, TwitchChannel, TwitchMessage>.Stop()
@@ -67,6 +70,7 @@ namespace CatCore.Services.Twitch
 
 			await _twitchIrcService.Stop();
 			await _twitchPubSubServiceManager.Stop();
+			await _twitchEventSubServiceManager.Stop();
 		}
 
 		/// <inheritdoc />
