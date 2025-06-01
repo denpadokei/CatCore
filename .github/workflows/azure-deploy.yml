@@ -1,0 +1,66 @@
+name: Build and deploy dotnet core app to Azure Function Apps
+
+on:
+  push:
+    branches:
+      - event-sub
+  workflow_dispatch:
+
+env:
+  AZURE_FUNCTIONAPP_PACKAGE_PATH: '.' # プロジェクトパス
+  DOTNET_VERSION: '8.0.x' # 使用する .NET バージョン
+
+jobs:
+  build-and-deploy-catcoreapi:
+    runs-on: windows-latest
+    steps:
+      - name: 'Checkout GitHub Action'
+        uses: actions/checkout@v4
+
+      - name: Setup DotNet ${{ env.DOTNET_VERSION }} Environment
+        uses: actions/setup-dotnet@v1
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: 'Resolve Project Dependencies Using Dotnet (CatCore.Azure)'
+        shell: pwsh
+        run: |
+          pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
+          dotnet build CatCore.Azure --configuration Release --output ./output
+          popd
+
+      - name: 'Run Azure Functions Action (CatCoreAPI)'
+        uses: Azure/functions-action@v1
+        id: fa
+        with:
+          app-name: 'CatCoreAPI'
+          slot-name: 'Production'
+          package: '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/output'
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_47DA3CE48CE843989BB1F6C0BDD6B426 }}
+
+  # build-and-deploy-catcorejp:
+  #   runs-on: windows-latest
+  #   steps:
+  #     - name: 'Checkout GitHub Action'
+  #       uses: actions/checkout@v4
+
+  #     - name: Setup DotNet ${{ env.DOTNET_VERSION }} Environment
+  #       uses: actions/setup-dotnet@v1
+  #       with:
+  #         dotnet-version: ${{ env.DOTNET_VERSION }}
+
+  #     - name: 'Resolve Project Dependencies Using Dotnet (CatCoreJP)'
+  #       shell: pwsh
+  #       run: |
+  #         pushd './${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}'
+  #         dotnet build CatCore.Azure --configuration Release --output ./output
+  #         popd
+
+  #     - name: 'Run Azure Functions Action (CatCoreJP)'
+  #       uses: Azure/functions-action@v1
+  #       id: fa
+  #       with:
+  #         app-name: 'CatCoreJP'
+  #         slot-name: 'Production'
+  #         package: '${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}/output'
+  #         publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_938C9A1815024301BF108B0D01545FBB }}
