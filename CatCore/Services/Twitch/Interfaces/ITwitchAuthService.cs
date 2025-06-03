@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using CatCore.Models.Credentials;
 using CatCore.Models.Twitch.OAuth;
@@ -8,6 +8,7 @@ namespace CatCore.Services.Twitch.Interfaces
 	internal interface ITwitchAuthService
 	{
 		string? AccessToken { get; }
+		string? AppAccessToken { get; }
 		bool HasTokens { get; }
 		bool TokenIsValid { get; }
 

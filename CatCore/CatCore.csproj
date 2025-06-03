@@ -24,9 +24,21 @@
 		<Title>CatCore</Title>
 		<Description>CatCore is a .NET Standard 2.0 library which provides a shared connection to mods and other applications for Twitch (and other future streaming platforms).</Description>
 		<Authors>Eris</Authors>
-    <Version>101.1.1-alpha1</Version>
+		<Version>101.1.1-alpha1</Version>
 		<Copyright>Copyright © Eris 2023</Copyright>
 		<PackageProjectUrl>https://github.com/ErisApps/CatCore</PackageProjectUrl>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+	  <DebugType>embedded</DebugType>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Develop|AnyCPU'">
+	  <DebugType>embedded</DebugType>
+	</PropertyGroup>
+
+	<PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+	  <DebugType>embedded</DebugType>
 	</PropertyGroup>
 
 	<ItemGroup>

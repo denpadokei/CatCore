@@ -67,12 +67,29 @@ namespace CatCore.Models.Twitch.EventSub
         public const string USER_AUTHORIZATION_REVOKE = "user.authorization.revoke";
         /// <summary>ユーザー情報が更新されたとき</summary>
         public const string USER_UPDATE = "user.update";
-    }
 
-    /// <summary>
-    /// EventSubのサブスクリプション条件を生成するヘルパーです。
-    /// </summary>
-    internal static class EventSubConditions
+		// --- チャット関連 EventSub タイプ ---
+		/// <summary>チャットメッセージが送信されたとき</summary>
+		public const string CHANNEL_CHAT_MESSAGE = "channel.chat.message";
+		/// <summary>チャットメッセージが削除されたとき</summary>
+		public const string CHANNEL_CHAT_MESSAGE_DELETE = "channel.chat.message_delete";
+		/// <summary>チャットクリア（全削除）が行われたとき</summary>
+		public const string CHANNEL_CHAT_CLEAR = "channel.chat.clear";
+		/// <summary>チャットモード（例: サブスク限定、スローモード等）が変更されたとき</summary>
+		public const string CHANNEL_CHAT_SETTINGS_UPDATE = "channel.chat.settings_update";
+		/// <summary>チャット参加者リストが更新されたとき</summary>
+		public const string CHANNEL_CHAT_USER_UPDATE = "channel.chat.user_update";
+		/// <summary>チャットでシャウトアウトが行われたとき</summary>
+		public const string CHANNEL_SHOUTOUT_CREATE = "channel.shoutout.create";
+		/// <summary>チャットでシャウトアウトが受信されたとき</summary>
+		public const string CHANNEL_SHOUTOUT_RECEIVE = "channel.shoutout.receive";
+
+	}
+
+	/// <summary>
+	/// EventSubのサブスクリプション条件を生成するヘルパーです。
+	/// </summary>
+	internal static class EventSubConditions
     {
         public static object BroadcasterUserId(string channelId) => new { broadcaster_user_id = channelId };
         public static object ModeratorUserId(string channelId, string userId) => new { broadcaster_user_id = channelId, moderator_user_id = userId };

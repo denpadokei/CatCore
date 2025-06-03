@@ -51,6 +51,9 @@ namespace CatCore.Services.Twitch
 		/// <inheritdoc />
 		public ITwitchChannelManagementService GetChannelManagementService() => _twitchChannelManagementService;
 
+		/// <inheritdoc />
+		public ITwitchEventSubServiceManager GetEventSubServiceManager() => _twitchEventSubServiceManager;
+
 		async Task IPlatformService<ITwitchService, TwitchChannel, TwitchMessage>.Start()
 		{
 			_logger.Information("Initializing {Type}", nameof(TwitchService));
@@ -58,7 +61,7 @@ namespace CatCore.Services.Twitch
 			RegisterInternalEventHandlers();
 
 			await _twitchIrcService.Start();
-			await _twitchPubSubServiceManager.Start();
+			//await _twitchPubSubServiceManager.Start();
 			await _twitchEventSubServiceManager.Start();
 		}
 

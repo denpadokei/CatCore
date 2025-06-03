@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using CatCore.Helpers;
 using CatCore.Models.EventArgs;
 using CatCore.Models.Shared;
 using CatCore.Models.Twitch.EventSub.Responses;
 using CatCore.Models.Twitch.EventSub.Responses.VideoPlayback;
+using CatCore.Models.Twitch.PubSub;
 using CatCore.Models.Twitch.PubSub.Responses.VideoPlayback;
 using CatCore.Services.Interfaces;
 using CatCore.Services.Twitch.Interfaces;
@@ -21,6 +23,8 @@ namespace CatCore.Services.Twitch
 		private readonly ITwitchChannelManagementService _twitchChannelManagementService;
 
 		private readonly Dictionary<string, TwitchEventSubWebSocketAgent> _activeEventSubConnections;
+		private readonly HashSet<string> _topicsWithRegisteredCallbacks = new();
+		private readonly SemaphoreSlim _topicRegistrationLocker = new SemaphoreSlim(1, 1);
 
 		public TwitchEventSubServiceManager(
 			ILogger logger,
@@ -39,15 +43,44 @@ namespace CatCore.Services.Twitch
 			_activeEventSubConnections = new Dictionary<string, TwitchEventSubWebSocketAgent>();
 		}
 
-		Task ITwitchEventSubServiceManager.Start()
+		private void RegisterTopicWhenNeeded(string topic)
+		{
+			using var _ = Synchronization.Lock(_topicRegistrationLocker);
+			if (!_topicsWithRegisteredCallbacks.Add(topic))
+			{
+				_logger.Warning("Topic was already requested by previous callbacks");
+				return;
+			}
+			SendListenRequestToAgentsInternal(topic);
+		}
+
+		private void SendListenRequestToAgentsInternal(string topic)
+		{
+			var selfUserId = _twitchAuthService.FetchLoggedInUserInfo()?.UserId;
+			if (CanRegisterTopicOnAllChannels(topic))
+			{
+				foreach (var twitchPubSubServiceExperimentalAgent in _activeEventSubConnections)
+				{
+					twitchPubSubServiceExperimentalAgent.Value.StartAsync().ConfigureAwait(false);
+				}
+			}
+			else if (selfUserId != null && _activeEventSubConnections.TryGetValue(selfUserId, out var selfPubSubServiceExperimentalAgent))
+			{
+				selfPubSubServiceExperimentalAgent.StartAsync().ConfigureAwait(false);
+			}
+		}
+
+		async Task ITwitchEventSubServiceManager.Start()
 		{
 			foreach (var channelId in _twitchChannelManagementService.GetAllActiveChannelIds())
 			{
-				_ = CreateEventSubAgent(channelId);
+				CreateEventSubAgent(channelId);
 			}
-			// EventSubではトピック登録の仕組みが異なる場合、ここで適宜初期化処理を追加
-
-			return Task.CompletedTask;
+			using var _ = await Synchronization.LockAsync(_topicRegistrationLocker);
+			foreach (var connect in _activeEventSubConnections.Values)
+			{
+				var __ = connect.StartAsync().ConfigureAwait(false);
+			}
 		}
 
 		async Task ITwitchEventSubServiceManager.Stop()
@@ -105,13 +138,17 @@ namespace CatCore.Services.Twitch
 			);
 
 			// 必要に応じてイベントハンドラを登録
-			// agent.OnEventXxx += NotifyOnEventXxx;
-			// イベントハンドラをメソッドで登録
 			agent.OnStreamOnline += NotifyOnStreamUp;
 			agent.OnStreamOffline += NotifyOnStreamDown;
 			agent.OnChannelFollow += NotifyOnFollow;
 			agent.OnChannelPointsRedeem += NotifyOnChannelPointsRedeem;
-			agent.OnPredictionBegin += NotifyOnPredictionBegin; // 追加
+			agent.OnPredictionBegin += NotifyOnPredictionBegin;
+
+			// --- 追加: チャット・シャウトアウト関連イベント ---
+			agent.OnChatMessage += NotifyOnChatMessage;
+			agent.OnChatMessageDelete += NotifyOnChatMessageDelete;
+			agent.OnShoutoutCreate += NotifyOnShoutoutCreate;
+			agent.OnShoutoutReceive += NotifyOnShoutoutReceive;
 
 			return _activeEventSubConnections[channelId] = agent;
 		}
@@ -119,13 +156,17 @@ namespace CatCore.Services.Twitch
 		private async Task DestroyEventSubAgent(string channelId, TwitchEventSubWebSocketAgent agent)
 		{
 			// 必要に応じてイベントハンドラを解除
-			// agent.OnEventXxx -= NotifyOnEventXxx;
-			// イベントハンドラを解除
 			agent.OnStreamOnline -= NotifyOnStreamUp;
 			agent.OnStreamOffline -= NotifyOnStreamDown;
 			agent.OnChannelFollow -= NotifyOnFollow;
 			agent.OnChannelPointsRedeem -= NotifyOnChannelPointsRedeem;
-			agent.OnPredictionBegin -= NotifyOnPredictionBegin; // 追加
+			agent.OnPredictionBegin -= NotifyOnPredictionBegin;
+
+			// --- 追加: チャット・シャウトアウト関連イベント ---
+			agent.OnChatMessage -= NotifyOnChatMessage;
+			agent.OnChatMessageDelete -= NotifyOnChatMessageDelete;
+			agent.OnShoutoutCreate -= NotifyOnShoutoutCreate;
+			agent.OnShoutoutReceive -= NotifyOnShoutoutReceive;
 
 			await agent.DisposeAsync().ConfigureAwait(false);
 

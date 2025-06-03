@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <!-- This file contains project properties used by the build. -->
 <Project>
 	<ItemGroup>
@@ -34,7 +34,7 @@
 		<!-- Used when skipping ILRepack step -->
 		<ItemGroup Condition="'$(Configuration)' == 'Debug'">
 			<OutputCopy Include="$(OutDir)$(AssemblyName).dll" OutputPath="Libs\$(AssemblyName).dll"/>
-			<OutputCopy Include="$(OutDir)$(AssemblyName).pdb" OutputPath="Libs\$(AssemblyName).pdb"/>
+			<!--<OutputCopy Include="$(OutDir)$(AssemblyName).pdb" OutputPath="Libs\$(AssemblyName).pdb"/>-->
 			<OutputCopy Include="$(OutDir)$(AssemblyName).xml" OutputPath="Libs\$(AssemblyName).xml"/>
 		</ItemGroup>
 
@@ -46,7 +46,7 @@
 
 		<!-- PDB will only be available when ILRepacking on Windows  -->
 		<ItemGroup Condition="'$(Configuration)' != 'Debug' AND '$(OS)' == 'Windows_NT'">
-			<OutputCopy Include="$(OutDir)Merged\$(AssemblyName).pdb" OutputPath="Libs\$(AssemblyName).pdb"/>
+			<!--<OutputCopy Include="$(OutDir)Merged\$(AssemblyName).pdb" OutputPath="Libs\$(AssemblyName).pdb"/>-->
 		</ItemGroup>
 
 		<!-- Manifest path stays the same regardless of whether ILRepack step is being used or not -->

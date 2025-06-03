@@ -392,6 +392,7 @@ namespace CatCore.Services.Twitch
 					_ = StartInternal().ConfigureAwait(false);
 					break;
 				case TwitchIrcCommands.HOSTTARGET:
+				default:
 					// NOP
 					// Consumers are already notified of this through a NOTICE message when the logged in user hosts/stops hosting a channel
 					// Also doesn't cover when the user is the one getting hosted by another channel
