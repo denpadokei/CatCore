@@ -33,7 +33,6 @@ namespace CatCore.Azure.Services.Twitch
 				new KeyValuePair<string, string>("client_id", clientId ?? string.Empty),
 				new KeyValuePair<string, string>("client_secret", clientSecret ?? string.Empty),
 				new KeyValuePair<string, string>("code", authorizationCode),
-				new KeyValuePair<string, string>("grant_type", "client_credentials"),
 				new KeyValuePair<string, string>("grant_type", "authorization_code"),
 				new KeyValuePair<string, string>("redirect_uri", redirectUrl)
 			});
