@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Reactive.Linq;
@@ -86,7 +86,7 @@ namespace CatCore.Services
 					or ConnectionStatus.Aborted
 					or ConnectionStatus.ConnectionFailed
 					or ConnectionStatus.Close)
-				.Do(_ => tcs.SetResult(null!))
+				.Do(_ => tcs.TrySetResult(null!))
 				.Subscribe();
 			_disconnectObservable = _websocketConnectionSubject
 				.Where(tuple => tuple.state is ConnectionStatus.Disconnected
@@ -94,7 +94,7 @@ namespace CatCore.Services
 					or ConnectionStatus.Aborted
 					or ConnectionStatus.ConnectionFailed
 					or ConnectionStatus.Close)
-				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for url: {Url}", tuple.state, url))
+				.Do(tuple => _logger.Debug("A disconnect occured ({State} : {Message}) for url: {Url}", tuple.state, tuple.dataframe?.Message, url))
 				.Select(_ => Observable.FromAsync(() => Connect(url)))
 				.Concat()
 				.Subscribe();

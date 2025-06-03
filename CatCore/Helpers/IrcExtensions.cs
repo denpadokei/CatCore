@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 
@@ -36,7 +36,11 @@ namespace CatCore.Helpers
 				nextSpacePosition = messageAsSpan.IndexOf(' ');
 				if (nextSpacePosition == -1)
 				{
-					throw new Exception("Invalid IRC Message");
+					if (messageAsSpan.Length > position)
+					{
+						commandType = "";
+						return;
+					}
 				}
 
 				var tagsAsSpan = messageAsSpan.Slice(1, nextSpacePosition - 1);

@@ -12,6 +12,7 @@ using CatCore.Models.Credentials;
 using CatCore.Models.Twitch.OAuth;
 using CatCore.Services.Interfaces;
 using CatCore.Services.Twitch.Interfaces;
+using CatCore.Shared.Models.Twitch.OAuth;
 using Polly;
 using Polly.Retry;
 using Serilog;
@@ -39,13 +40,19 @@ namespace CatCore.Services.Twitch
 			"channel:manage:raids",
 			"channel:manage:redemptions",
 			"channel:moderate",
+			"moderator:read:followers",
 			"channel:read:subscriptions",
+			"channel:bot",
 			"moderator:manage:announcements",
 			"moderator:manage:banned_users",
 			"moderator:manage:chat_messages",
 			"moderator:manage:chat_settings",
+			"moderator:manage:shoutouts",
+			"moderator:read:followers",
 			"user:manage:chat_color",
-			"user:read:follows"
+			"user:read:follows",
+			"user:write:chat",
+			"user:bot",
 		};
 
 		private readonly ILogger _logger;
@@ -59,6 +66,7 @@ namespace CatCore.Services.Twitch
 		protected override string ServiceType => SERVICE_TYPE;
 
 		public string? AccessToken => Credentials.AccessToken;
+		public string? AppAccessToken => Credentials.AppAccessToken;
 
 		public bool HasTokens => !string.IsNullOrWhiteSpace(AccessToken) && !string.IsNullOrWhiteSpace(Credentials.RefreshToken);
 
@@ -192,10 +200,24 @@ namespace CatCore.Services.Twitch
 					_logger.Warning($"Exchanging authorization code for credentials resulted in non-success status code: {responseMessage.StatusCode}");
 					return;
 				}
-				var contentString = responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+				var contentString = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+				_logger.Debug("App token response(1): {Content}", contentString);
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
 
-				var newCredentials = new TwitchCredentials(authorizationResponse);
+				using var appResponseMessage = await _catCoreAuthClient
+					.PostAsync($"{_constants.CatCoreAuthServerUri}api/twitch/appauthorize", null)
+					.ConfigureAwait(false);
+
+				if (!appResponseMessage.IsSuccessStatusCode)
+				{
+					_logger.Warning($"Exchanging authorization code for credentials resulted in non-success status code: {appResponseMessage.StatusCode}");
+					return;
+				}
+				var contentStringAppToken = await appResponseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+				_logger.Debug("App token response(2): {Content}", contentStringAppToken);
+				var appauthorizationResponse = JsonSerializer.Deserialize<AppTokenAuthorizationResponse>(contentStringAppToken);
+				//var appauthorizationResponse = await appResponseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AppTokenAuthorizationResponse).ConfigureAwait(false);
+				var newCredentials = new TwitchCredentials(authorizationResponse, appauthorizationResponse);
 				await ValidateAccessToken(newCredentials).ConfigureAwait(false);
 			}
 			catch (HttpRequestException ex)
@@ -206,14 +228,41 @@ namespace CatCore.Services.Twitch
 			{
 				_logger.Error(ex, "An error occured while trying to deserialize the credentials response");
 			}
+			catch (Exception ex)
+			{
+				_logger.Error(ex, "An unexpected error occurred while trying to exchange the authorization code for credentials");
+			}
 		}
 
 		public async Task<ValidationResponse?> ValidateAccessToken(TwitchCredentials credentials, bool resetDataOnFailure = true)
 		{
-			if (string.IsNullOrWhiteSpace(credentials.AccessToken))
+			if (string.IsNullOrWhiteSpace(credentials.AccessToken) || string.IsNullOrEmpty(credentials.AppAccessToken))
 			{
 				return null;
 			}
+
+			using var appTokenresponseMessage = await _exceptionRetryPolicy
+				.ExecuteAsync(async () =>
+				{
+					using var requestMessage = new HttpRequestMessage(HttpMethod.Get, TWITCH_AUTH_BASEURL + "validate");
+					requestMessage.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credentials.AppAccessToken);
+					return await _twitchAuthClient.SendAsync(requestMessage).ConfigureAwait(false);
+				})
+				.ConfigureAwait(false);
+
+			if (!appTokenresponseMessage.IsSuccessStatusCode)
+			{
+				if (resetDataOnFailure)
+				{
+					UpdateCredentials(TwitchCredentials.Empty());
+					_loggedInUser = null;
+				}
+
+				Status = AuthenticationStatus.Unauthorized;
+
+				return null;
+			}
+			var appTokenvalidationResponse = await appTokenresponseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.ValidationResponse).ConfigureAwait(false);
 
 			using var responseMessage = await _exceptionRetryPolicy
 				.ExecuteAsync(async () =>
@@ -241,7 +290,7 @@ namespace CatCore.Services.Twitch
 			_loggedInUser = validationResponse;
 
 			UpdateCredentials(credentials.ValidUntil!.Value > validationResponse.ExpiresIn
-				? new TwitchCredentials(credentials.AccessToken, credentials.RefreshToken, validationResponse.ExpiresIn)
+				? new TwitchCredentials(credentials.AccessToken, credentials.RefreshToken, credentials.AppAccessToken, validationResponse.ExpiresIn, appTokenvalidationResponse.ExpiresIn)
 				: credentials);
 
 			Status = AuthenticationStatus.Authenticated;
@@ -277,7 +326,20 @@ namespace CatCore.Services.Twitch
 
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
 
-				var refreshedCredentials = new TwitchCredentials(authorizationResponse);
+				using var appTokenresponseMessage = await _exceptionRetryPolicy.ExecuteAsync(() => _catCoreAuthClient
+					.PostAsync($"{_constants.CatCoreAuthServerUri}api/twitch/appauthorize", null))
+					.ConfigureAwait(false);
+
+				if (!appTokenresponseMessage.IsSuccessStatusCode)
+				{
+					_logger.Warning("Refreshing tokens resulted in non-success status code");
+					return false;
+				}
+
+				var appTokenauthorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AppTokenAuthorizationResponse).ConfigureAwait(false);
+
+
+				var refreshedCredentials = new TwitchCredentials(authorizationResponse, appTokenauthorizationResponse);
 				return await ValidateAccessToken(refreshedCredentials).ConfigureAwait(false) != null;
 			}
 			catch (JsonException ex)
