@@ -19,6 +19,7 @@ using Serilog;
 
 namespace CatCore.Services.Twitch
 {
+	[Obsolete("Legacy IRC transport is deprecated. Use EventSub via ITwitchIrcService registration.")]
 	internal sealed class TwitchIrcService : ITwitchIrcService
 	{
 		private const string TWITCH_IRC_ENDPOINT = "wss://irc-ws.chat.twitch.tv:443";
