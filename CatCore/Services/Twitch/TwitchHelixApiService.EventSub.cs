@@ -172,8 +172,35 @@ namespace CatCore.Services.Twitch
 			_logger.Verbose("Deleting EventSub subscription: {SubscriptionId}", subscriptionId);
 #endif
 
-			_logger.Warning("DeleteEventSubSubscription: Not fully implemented. Placeholder only.");
-			return false;
+			try
+			{
+				using var httpResponseMessage = await _combinedHelixPolicy.ExecuteAsync(async ct =>
+				{
+					using var httpRequestMessage = new HttpRequestMessage(HttpMethod.Delete, url);
+					return await _helixClient.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+				}, cancellationToken).ConfigureAwait(false);
+
+				if (httpResponseMessage == null)
+				{
+					_logger.Warning("Failed to delete EventSub subscription {SubscriptionId}: received null HTTP response", subscriptionId);
+					return false;
+				}
+
+				if (!httpResponseMessage.IsSuccessStatusCode)
+				{
+					var errorContent = await httpResponseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+					_logger.Warning("Failed to delete EventSub subscription {SubscriptionId}. StatusCode={StatusCode}, Response={Response}", subscriptionId, httpResponseMessage.StatusCode, errorContent);
+					return false;
+				}
+
+				_logger.Information("EventSub subscription deleted successfully. ID: {SubscriptionId}", subscriptionId);
+				return true;
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to delete EventSub subscription {SubscriptionId}", subscriptionId);
+				return false;
+			}
 		}
 	}
 }

@@ -175,6 +175,7 @@ namespace CatCore.Services.Twitch.Media
 			// Extract Twitch emotes from fragments
 			if (twitchConfig.ParseTwitchEmotes)
 			{
+				var emoteSearchOffset = 0;
 				foreach (var fragment in fragments)
 				{
 					if (fragment.Type == "emote" && fragment.Emote.HasValue)
@@ -182,13 +183,24 @@ namespace CatCore.Services.Twitch.Media
 						var emoteFragment = fragment.Emote.Value;
 						var prefixedEmoteId = "TwitchEmote_" + emoteFragment.Id;
 
-						// Find the position of this emote text in the message
-						var startIndex = message.IndexOf(fragment.Text);
+						// Find the position of this emote text in the message, starting from the current offset
+						// to correctly handle repeated emote text appearing multiple times.
+						var startIndex = message.IndexOf(fragment.Text, emoteSearchOffset);
 						if (startIndex >= 0)
 						{
 							var endIndex = startIndex + fragment.Text.Length - 1;
 							var emoteUrl = $"https://static-cdn.jtvnw.net/emoticons/v2/{emoteFragment.Id}/static/dark/3.0";
 							emotes.Add(new TwitchEmote(prefixedEmoteId, fragment.Text, startIndex, endIndex, emoteUrl));
+							emoteSearchOffset = endIndex + 1;
+						}
+					}
+					else
+					{
+						// Advance the offset past non-emote fragments to keep position tracking accurate.
+						var fragStart = message.IndexOf(fragment.Text, emoteSearchOffset);
+						if (fragStart >= 0)
+						{
+							emoteSearchOffset = fragStart + fragment.Text.Length;
 						}
 					}
 				}
@@ -203,11 +215,18 @@ namespace CatCore.Services.Twitch.Media
 			// Extract cheermotes and custom emotes from non-emote fragments
 			if (twitchConfig.ParseCheermotes && bits > 0 || twitchConfig.ParseBttvEmotes || twitchConfig.ParseFfzEmotes)
 			{
+				var fragmentSearchOffset = 0;
 				foreach (var fragment in fragments)
 				{
+					var fragStart = message.IndexOf(fragment.Text, fragmentSearchOffset);
+					if (fragStart >= 0)
+					{
+						fragmentSearchOffset = fragStart + fragment.Text.Length;
+					}
+
 					if (fragment.Type == "text")
 					{
-						ExtractOtherEmotesFromText(emotes, fragment.Text, message, channelId, twitchConfig.ParseCheermotes && bits > 0, twitchConfig.ParseBttvEmotes || twitchConfig.ParseFfzEmotes);
+						ExtractOtherEmotesFromText(emotes, fragment.Text, message, channelId, twitchConfig.ParseCheermotes && bits > 0, twitchConfig.ParseBttvEmotes || twitchConfig.ParseFfzEmotes, fragStart >= 0 ? fragStart : 0);
 					}
 				}
 			}
@@ -215,7 +234,7 @@ namespace CatCore.Services.Twitch.Media
 			return emotes;
 		}
 
-		private void ExtractOtherEmotesFromText(List<IChatEmote> emotes, string fragmentText, string fullMessage, string channelId, bool parseCheermotes, bool parseCustomEmotes)
+		private void ExtractOtherEmotesFromText(List<IChatEmote> emotes, string fragmentText, string fullMessage, string channelId, bool parseCheermotes, bool parseCustomEmotes, int startOffset = 0)
 		{
 			if (!parseCheermotes && !parseCustomEmotes)
 			{
@@ -223,7 +242,7 @@ namespace CatCore.Services.Twitch.Media
 			}
 
 			var words = fragmentText.Split(new[] { ' ', '\t', '\n', '\r' }, System.StringSplitOptions.RemoveEmptyEntries);
-			var searchStartIndex = 0;
+			var searchStartIndex = startOffset;
 
 			foreach (var word in words)
 			{

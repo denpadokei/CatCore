@@ -388,12 +388,20 @@ namespace CatCore.Services.Twitch
 					(uint)(ev.Cheer?.Bits ?? 0)
 				);
 
+				// Determine if the logged-in user is mentioned
+				var isMentioned = false;
+				if (_loggedInUser != null && !string.IsNullOrEmpty(ev.Message.Text))
+				{
+					var mention = "@" + _loggedInUser.Value.LoginName;
+					isMentioned = ev.Message.Text.IndexOf(mention, StringComparison.OrdinalIgnoreCase) >= 0;
+				}
+
 				// Build TwitchMessage
 				var twitchMessage = new TwitchMessage(
 					ev.MessageId,
 					false,
 					ev.MessageType == "ACTION",
-					ev.Message.Text.Contains($"@{_loggedInUser?.LoginName}"),
+					isMentioned,
 					ev.Message.Text,
 					user,
 					channel,
@@ -483,7 +491,7 @@ namespace CatCore.Services.Twitch
 			}
 			catch (Exception ex)
 			{
-				_logger.Warning(ex, "Failed to handle channel.chat.message.delete");
+				_logger.Warning(ex, "Failed to handle channel.chat.message_delete");
 			}
 		}
 
@@ -520,26 +528,16 @@ namespace CatCore.Services.Twitch
 
 				// Build IRC-equivalent tags dictionary
 				var tags = new Dictionary<string, string>();
-				if (ev.EmoteMode)
-				{
-					tags[IrcMessageTags.EMOTE_ONLY] = "1";
-				}
-				if (ev.FollowerMode)
-				{
-					tags[IrcMessageTags.FOLLOWERS_ONLY] = ev.FollowerModeDurationMinutes.ToString();
-				}
-				if (ev.SubscriberMode)
-				{
-					tags[IrcMessageTags.SUBS_ONLY] = "1";
-				}
-				if (ev.UniqueChatMode)
-				{
-					tags[IrcMessageTags.R9_K] = "1";
-				}
-				if (ev.SlowMode)
-				{
-					tags[IrcMessageTags.SLOW] = ev.SlowModeWaitSeconds.ToString();
-				}
+				// Populate tags for both enabled and disabled states so room state transitions correctly.
+				tags[IrcMessageTags.EMOTE_ONLY] = ev.EmoteMode ? "1" : "0";
+				tags[IrcMessageTags.FOLLOWERS_ONLY] = ev.FollowerMode
+					? ev.FollowerModeDurationMinutes.ToString()
+					: "-1";
+				tags[IrcMessageTags.SUBS_ONLY] = ev.SubscriberMode ? "1" : "0";
+				tags[IrcMessageTags.R9_K] = ev.UniqueChatMode ? "1" : "0";
+				tags[IrcMessageTags.SLOW] = ev.SlowMode
+					? ev.SlowModeWaitSeconds.ToString()
+					: "0";
 
 				var roomStateDict = new ReadOnlyDictionary<string, string>(tags);
 				_roomStateTrackerService.UpdateRoomState(ev.BroadcasterUserLogin, roomStateDict);
@@ -565,10 +563,17 @@ namespace CatCore.Services.Twitch
 				return;
 			}
 
+			var activeChannels = _twitchChannelManagementService.GetAllActiveChannelsAsDictionary();
 			var channelIds = _twitchChannelManagementService.GetAllActiveChannelIds();
 			foreach (var channelId in channelIds)
 			{
-				await SubscribeToChannelInternal(channelId, _twitchChannelManagementService.GetAllActiveChannelsAsDictionary()[channelId]).ConfigureAwait(false);
+				if (!activeChannels.TryGetValue(channelId, out var channelName))
+				{
+					_logger.Warning("Active channel dictionary missing entry for channel ID {ChannelId} while subscribing to all channels.", channelId);
+					continue;
+				}
+
+				await SubscribeToChannelInternal(channelId, channelName).ConfigureAwait(false);
 			}
 		}
 
@@ -609,6 +614,15 @@ namespace CatCore.Services.Twitch
 
 			if (subscriptionIds.Count > 0)
 			{
+				// Delete any existing subscriptions for this channel before replacing to avoid leaks.
+				if (_channelSubscriptionIds.TryRemove(channelId, out var existingSubscriptionIds))
+				{
+					foreach (var existingId in existingSubscriptionIds)
+					{
+						await _twitchHelixApiService.DeleteEventSubSubscription(existingId).ConfigureAwait(false);
+					}
+				}
+
 				_channelSubscriptionIds[channelId] = subscriptionIds;
 				OnJoinChannel?.Invoke(new TwitchChannel(this, channelId, channelName));
 			}
