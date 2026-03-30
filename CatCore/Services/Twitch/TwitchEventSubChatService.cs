@@ -54,6 +54,8 @@ namespace CatCore.Services.Twitch
 		private const string SUB_TYPE_CHANNEL_REWARD_REDEEM = "channel.channel_points_custom_reward_redemption.add";
 		private const string EVENTSUB_VERSION = "1";
 		private const string EVENTSUB_VERSION_FOLLOW = "2";
+		private static readonly TimeSpan VIEW_COUNT_POLL_INTERVAL = TimeSpan.FromSeconds(30);
+		private const int HELIX_USER_IDS_PER_REQUEST_LIMIT = 100;
 
 		private readonly ILogger _logger;
 		private readonly IKittenWebSocketProvider _kittenWebSocketProvider;
@@ -72,9 +74,12 @@ namespace CatCore.Services.Twitch
 
 		// channelId → subscriptionIds[]
 		private readonly ConcurrentDictionary<string, List<string>> _channelSubscriptionIds;
+		private readonly ConcurrentDictionary<Action<string, ViewCountUpdate>, bool> _viewCountCallbackRegistrations = new();
 
 		private readonly SemaphoreSlim _connectionLockerSemaphoreSlim = new(1, 1);
-		private bool _loggedUnsupportedViewCount;
+		private readonly object _viewCountPollingStateLock = new();
+		private CancellationTokenSource? _viewCountPollingCancellationTokenSource;
+		private Task? _viewCountPollingTask;
 
 		public TwitchEventSubChatService(ILogger logger, IKittenWebSocketProvider kittenWebSocketProvider, IKittenPlatformActiveStateManager activeStateManager,
 			ITwitchAuthService twitchAuthService, ITwitchChannelManagementService twitchChannelManagementService, ITwitchRoomStateTrackerService roomStateTrackerService,
@@ -110,14 +115,21 @@ namespace CatCore.Services.Twitch
 		{
 			add
 			{
-				if (!_loggedUnsupportedViewCount)
+				if (_viewCountCallbackRegistrations.TryAdd(value, false))
 				{
-					_loggedUnsupportedViewCount = true;
-					_logger.Warning("OnViewCountUpdated is not available via EventSub. Consider polling Helix Get Streams for viewer counts.");
+					TryStartViewCountPollingIfNeeded();
+				}
+				else
+				{
+					_logger.Warning("Callback was already registered for EventHandler {Name}", nameof(ITwitchPubSubServiceManager.OnViewCountUpdated));
 				}
 			}
 			remove
 			{
+				if (_viewCountCallbackRegistrations.TryRemove(value, out _) && _viewCountCallbackRegistrations.IsEmpty)
+				{
+					_ = StopViewCountPollingIfRunning();
+				}
 			}
 		}
 
@@ -205,6 +217,8 @@ namespace CatCore.Services.Twitch
 
 		private async Task StopInternal()
 		{
+			await StopViewCountPollingIfRunning().ConfigureAwait(false);
+
 			// Unsubscribe from all channels
 			var channelIds = _channelSubscriptionIds.Keys.ToList();
 			foreach (var channelId in channelIds)
@@ -342,6 +356,7 @@ namespace CatCore.Services.Twitch
 				_logger.Information("EventSub session established. Session ID: {SessionId}", _sessionId);
 
 				OnChatConnected?.Invoke();
+				TryStartViewCountPollingIfNeeded();
 
 				// Subscribe to all active channels
 				_ = Task.Run(() => SubscribeToAllChannelsInternal());
@@ -1091,6 +1106,121 @@ namespace CatCore.Services.Twitch
 				"locked" => PredictionStatus.Locked,
 				_ => PredictionStatus.Active
 			};
+		}
+
+		private void TryStartViewCountPollingIfNeeded()
+		{
+			lock (_viewCountPollingStateLock)
+			{
+				if (_viewCountPollingCancellationTokenSource != null || _viewCountCallbackRegistrations.IsEmpty)
+				{
+					return;
+				}
+
+				if (_loggedInUser == null || !_activeStateManager.GetState(PlatformType.Twitch))
+				{
+					return;
+				}
+
+				_viewCountPollingCancellationTokenSource = new CancellationTokenSource();
+				_viewCountPollingTask = Task.Run(() => RunViewCountPollingLoop(_viewCountPollingCancellationTokenSource.Token));
+			}
+		}
+
+		private async Task StopViewCountPollingIfRunning()
+		{
+			CancellationTokenSource? cancellationTokenSource;
+			Task? pollingTask;
+
+			lock (_viewCountPollingStateLock)
+			{
+				cancellationTokenSource = _viewCountPollingCancellationTokenSource;
+				pollingTask = _viewCountPollingTask;
+				_viewCountPollingCancellationTokenSource = null;
+				_viewCountPollingTask = null;
+			}
+
+			if (cancellationTokenSource == null)
+			{
+				return;
+			}
+
+			cancellationTokenSource.Cancel();
+			try
+			{
+				if (pollingTask != null)
+				{
+					await pollingTask.ConfigureAwait(false);
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				// Expected while stopping
+			}
+			finally
+			{
+				cancellationTokenSource.Dispose();
+			}
+		}
+
+		private async Task RunViewCountPollingLoop(CancellationToken cancellationToken)
+		{
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				try
+				{
+					await PollViewCountsOnce(cancellationToken).ConfigureAwait(false);
+					await Task.Delay(VIEW_COUNT_POLL_INTERVAL, cancellationToken).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException)
+				{
+					break;
+				}
+				catch (Exception ex)
+				{
+					_logger.Warning(ex, "Failed to poll Twitch viewer counts");
+					await Task.Delay(VIEW_COUNT_POLL_INTERVAL, cancellationToken).ConfigureAwait(false);
+				}
+			}
+		}
+
+		private async Task PollViewCountsOnce(CancellationToken cancellationToken)
+		{
+			if (_viewCountCallbackRegistrations.IsEmpty)
+			{
+				return;
+			}
+
+			var channelIds = _channelSubscriptionIds.Keys.ToArray();
+			if (channelIds.Length == 0)
+			{
+				return;
+			}
+
+			var serverTimeRaw = ToLegacyServerTimeRaw(DateTimeOffset.UtcNow);
+			for (var offset = 0; offset < channelIds.Length; offset += HELIX_USER_IDS_PER_REQUEST_LIMIT)
+			{
+				cancellationToken.ThrowIfCancellationRequested();
+
+				var chunkSize = Math.Min(HELIX_USER_IDS_PER_REQUEST_LIMIT, channelIds.Length - offset);
+				var userIds = new string[chunkSize];
+				Array.Copy(channelIds, offset, userIds, 0, chunkSize);
+
+				var streamResponse = await _twitchHelixApiService.GetStreams(userIds: userIds, cancellationToken: cancellationToken).ConfigureAwait(false);
+				if (streamResponse == null)
+				{
+					continue;
+				}
+
+				foreach (var stream in streamResponse.Value.Data)
+				{
+					var viewCountUpdate = new ViewCountUpdate(serverTimeRaw, stream.ViewerCount);
+					foreach (var callback in _viewCountCallbackRegistrations.Keys)
+					{
+						callback(stream.UserId, viewCountUpdate);
+					}
+				}
+			}
 		}
 
 		private async Task UnsubscribeFromChannelInternal(string channelId)
