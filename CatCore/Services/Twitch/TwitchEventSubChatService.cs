@@ -14,14 +14,23 @@ using CatCore.Models.Twitch;
 using CatCore.Models.Twitch.EventSub;
 using CatCore.Models.Twitch.IRC;
 using CatCore.Models.Twitch.OAuth;
+using CatCore.Models.Twitch.PubSub.Responses;
+using CatCore.Models.Twitch.PubSub.Responses.ChannelPointsChannelV1;
+using CatCore.Models.Twitch.PubSub.Responses.Polls;
+using CatCore.Models.Twitch.PubSub.Responses.Predictions;
+using CatCore.Models.Twitch.PubSub.Responses.VideoPlayback;
+using CatCore.Models.Twitch.Shared;
 using CatCore.Services.Interfaces;
 using CatCore.Services.Twitch.Interfaces;
 using CatCore.Services.Twitch.Media;
 using Serilog;
+using PredictionBadge = CatCore.Models.Twitch.PubSub.Responses.Predictions.Badge;
+using PredictionUser = CatCore.Models.Twitch.PubSub.Responses.Predictions.User;
+using RewardUser = CatCore.Models.Twitch.PubSub.Responses.ChannelPointsChannelV1.User;
 
 namespace CatCore.Services.Twitch
 {
-	internal sealed class TwitchEventSubChatService : ITwitchIrcService
+	internal sealed class TwitchEventSubChatService : ITwitchIrcService, ITwitchPubSubServiceManager
 	{
 		private const string TWITCH_EVENTSUB_ENDPOINT = "wss://eventsub.wss.twitch.tv/ws";
 
@@ -31,7 +40,20 @@ namespace CatCore.Services.Twitch
 		private const string SUB_TYPE_CHANNEL_CHAT_MESSAGE_DELETE = "channel.chat.message_delete";
 		private const string SUB_TYPE_CHANNEL_CHAT_CLEAR = "channel.chat.clear";
 		private const string SUB_TYPE_CHANNEL_CHAT_SETTINGS_UPDATE = "channel.chat_settings.update";
+		private const string SUB_TYPE_STREAM_ONLINE = "stream.online";
+		private const string SUB_TYPE_STREAM_OFFLINE = "stream.offline";
+		private const string SUB_TYPE_CHANNEL_AD_BREAK_BEGIN = "channel.ad_break.begin";
+		private const string SUB_TYPE_CHANNEL_FOLLOW = "channel.follow";
+		private const string SUB_TYPE_CHANNEL_POLL_BEGIN = "channel.poll.begin";
+		private const string SUB_TYPE_CHANNEL_POLL_PROGRESS = "channel.poll.progress";
+		private const string SUB_TYPE_CHANNEL_POLL_END = "channel.poll.end";
+		private const string SUB_TYPE_CHANNEL_PREDICTION_BEGIN = "channel.prediction.begin";
+		private const string SUB_TYPE_CHANNEL_PREDICTION_PROGRESS = "channel.prediction.progress";
+		private const string SUB_TYPE_CHANNEL_PREDICTION_LOCK = "channel.prediction.lock";
+		private const string SUB_TYPE_CHANNEL_PREDICTION_END = "channel.prediction.end";
+		private const string SUB_TYPE_CHANNEL_REWARD_REDEEM = "channel.channel_points_custom_reward_redemption.add";
 		private const string EVENTSUB_VERSION = "1";
+		private const string EVENTSUB_VERSION_FOLLOW = "2";
 
 		private readonly ILogger _logger;
 		private readonly IKittenWebSocketProvider _kittenWebSocketProvider;
@@ -52,6 +74,7 @@ namespace CatCore.Services.Twitch
 		private readonly ConcurrentDictionary<string, List<string>> _channelSubscriptionIds;
 
 		private readonly SemaphoreSlim _connectionLockerSemaphoreSlim = new(1, 1);
+		private bool _loggedUnsupportedViewCount;
 
 		public TwitchEventSubChatService(ILogger logger, IKittenWebSocketProvider kittenWebSocketProvider, IKittenPlatformActiveStateManager activeStateManager,
 			ITwitchAuthService twitchAuthService, ITwitchChannelManagementService twitchChannelManagementService, ITwitchRoomStateTrackerService roomStateTrackerService,
@@ -82,6 +105,29 @@ namespace CatCore.Services.Twitch
 		public event Action<TwitchMessage>? OnMessageReceived;
 		public event Action<TwitchChannel, string>? OnMessageDeleted;
 		public event Action<TwitchChannel, string?>? OnChatCleared;
+
+		event Action<string, ViewCountUpdate> ITwitchPubSubServiceManager.OnViewCountUpdated
+		{
+			add
+			{
+				if (!_loggedUnsupportedViewCount)
+				{
+					_loggedUnsupportedViewCount = true;
+					_logger.Warning("OnViewCountUpdated is not available via EventSub. Consider polling Helix Get Streams for viewer counts.");
+				}
+			}
+			remove
+			{
+			}
+		}
+
+		public event Action<string, StreamUp>? OnStreamUp;
+		public event Action<string, StreamDown>? OnStreamDown;
+		public event Action<string, Commercial>? OnCommercial;
+		public event Action<string, Follow>? OnFollow;
+		public event Action<string, PollData>? OnPoll;
+		public event Action<string, PredictionData>? OnPrediction;
+		public event Action<string, RewardRedeemedData>? OnRewardRedeemed;
 
 		public void SendMessage(TwitchChannel channel, string message)
 		{
@@ -117,6 +163,16 @@ namespace CatCore.Services.Twitch
 		Task ITwitchIrcService.Stop()
 		{
 			_logger.Verbose("Stop requested by service manager");
+			return StopInternal();
+		}
+
+		Task ITwitchPubSubServiceManager.Start()
+		{
+			return StartInternal();
+		}
+
+		Task ITwitchPubSubServiceManager.Stop()
+		{
 			return StopInternal();
 		}
 
@@ -337,9 +393,309 @@ namespace CatCore.Services.Twitch
 				case SUB_TYPE_CHANNEL_CHAT_SETTINGS_UPDATE:
 					HandleSettingsUpdate(rawMessage);
 					break;
+				case SUB_TYPE_STREAM_ONLINE:
+					HandleStreamOnline(rawMessage);
+					break;
+				case SUB_TYPE_STREAM_OFFLINE:
+					HandleStreamOffline(rawMessage);
+					break;
+				case SUB_TYPE_CHANNEL_AD_BREAK_BEGIN:
+					HandleCommercial(rawMessage);
+					break;
+				case SUB_TYPE_CHANNEL_FOLLOW:
+					HandleFollow(rawMessage);
+					break;
+				case SUB_TYPE_CHANNEL_POLL_BEGIN:
+				case SUB_TYPE_CHANNEL_POLL_PROGRESS:
+				case SUB_TYPE_CHANNEL_POLL_END:
+					HandlePoll(rawMessage);
+					break;
+				case SUB_TYPE_CHANNEL_PREDICTION_BEGIN:
+				case SUB_TYPE_CHANNEL_PREDICTION_PROGRESS:
+				case SUB_TYPE_CHANNEL_PREDICTION_LOCK:
+				case SUB_TYPE_CHANNEL_PREDICTION_END:
+					HandlePrediction(rawMessage);
+					break;
+				case SUB_TYPE_CHANNEL_REWARD_REDEEM:
+					HandleRewardRedeem(rawMessage);
+					break;
 				default:
 					_logger.Verbose("Received unknown subscription type: {SubscriptionType}", metadata.SubscriptionType);
 					break;
+			}
+		}
+
+		private void HandleStreamOnline(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId))
+				{
+					return;
+				}
+
+				var startedAt = TryGetDateTime(ev, "started_at") ?? DateTimeOffset.UtcNow;
+				OnStreamUp?.Invoke(channelId, new StreamUp(ToLegacyServerTimeRaw(startedAt), 0));
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle stream.online");
+			}
+		}
+
+		private void HandleStreamOffline(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId))
+				{
+					return;
+				}
+
+				OnStreamDown?.Invoke(channelId, new StreamDown(ToLegacyServerTimeRaw(DateTimeOffset.UtcNow)));
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle stream.offline");
+			}
+		}
+
+		private void HandleCommercial(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId))
+				{
+					return;
+				}
+
+				var startedAt = TryGetDateTime(ev, "started_at") ?? DateTimeOffset.UtcNow;
+				OnCommercial?.Invoke(channelId, new Commercial(ToLegacyServerTimeRaw(startedAt), TryGetUInt(ev, "duration_seconds")));
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle channel.ad_break.begin");
+			}
+		}
+
+		private void HandleFollow(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId) ||
+				    !TryGetString(ev, "user_id", out var userId) ||
+				    !TryGetString(ev, "user_login", out var userLogin) ||
+				    !TryGetString(ev, "user_name", out var userName))
+				{
+					return;
+				}
+
+				OnFollow?.Invoke(channelId, new Follow(userId, userLogin, userName));
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle channel.follow");
+			}
+		}
+
+		private void HandlePoll(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId))
+				{
+					return;
+				}
+
+				var choices = new List<PollChoice>();
+				uint totalVoters = 0;
+				if (ev.TryGetProperty("choices", out var choicesElement) && choicesElement.ValueKind == JsonValueKind.Array)
+				{
+					foreach (var choice in choicesElement.EnumerateArray())
+					{
+						var bitsVotes = TryGetUInt(choice, "bits_votes");
+						var channelPointsVotes = TryGetUInt(choice, "channel_points_votes");
+						var votes = TryGetUInt(choice, "votes");
+						totalVoters += votes;
+						choices.Add(new PollChoice(
+							TryGetString(choice, "id", out var choiceId) ? choiceId : string.Empty,
+							TryGetString(choice, "title", out var choiceTitle) ? choiceTitle : string.Empty,
+							new Votes(votes, bitsVotes, channelPointsVotes, votes),
+							new Tokens(bitsVotes, channelPointsVotes),
+							votes));
+					}
+				}
+
+				var settings = new PollSettings(
+					new PollSettingsEntry(false, null),
+					new PollSettingsEntry(false, null),
+					new PollSettingsEntry(false, null),
+					new PollSettingsEntry(TryGetBool(ev, "bits_voting_enabled"), TryGetNullableUInt(ev, "bits_per_vote")),
+					new PollSettingsEntry(TryGetBool(ev, "channel_points_voting_enabled"), TryGetNullableUInt(ev, "channel_points_per_vote")));
+
+				var pollData = new PollData(
+					TryGetString(ev, "id", out var pollId) ? pollId : string.Empty,
+					channelId,
+					channelId,
+					TryGetString(ev, "title", out var pollTitle) ? pollTitle : string.Empty,
+					TryGetString(ev, "started_at", out var startedAtRaw) ? startedAtRaw : string.Empty,
+					TryGetString(ev, "ended_at", out var endedAtRaw) ? endedAtRaw : string.Empty,
+					string.Empty,
+					TryGetUInt(ev, "duration_seconds"),
+					settings,
+					ParsePollStatus(TryGetString(ev, "status", out var statusRaw) ? statusRaw : null),
+					choices,
+					new Votes(totalVoters, 0, 0, totalVoters),
+					new Tokens(0, 0),
+					totalVoters,
+					0,
+					null,
+					null,
+					null);
+
+				OnPoll?.Invoke(channelId, pollData);
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle channel.poll.*");
+			}
+		}
+
+		private void HandlePrediction(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId))
+				{
+					return;
+				}
+
+				var outcomes = new List<Outcome>();
+				if (ev.TryGetProperty("outcomes", out var outcomesElement) && outcomesElement.ValueKind == JsonValueKind.Array)
+				{
+					foreach (var outcome in outcomesElement.EnumerateArray())
+					{
+						var topPredictors = new List<TopPredictor>();
+						if (outcome.TryGetProperty("top_predictors", out var topPredictorsElement) && topPredictorsElement.ValueKind == JsonValueKind.Array)
+						{
+							foreach (var predictor in topPredictorsElement.EnumerateArray())
+							{
+								var used = TryGetUInt(predictor, "channel_points_used");
+								var won = TryGetUInt(predictor, "channel_points_won");
+								topPredictors.Add(new TopPredictor(
+									Guid.NewGuid().ToString("N"),
+									TryGetString(ev, "id", out var eventIdRaw) ? eventIdRaw : string.Empty,
+									TryGetString(outcome, "id", out var outcomeIdRaw) ? outcomeIdRaw : string.Empty,
+									channelId,
+									used,
+									DateTime.UtcNow,
+									DateTime.UtcNow,
+									TryGetString(predictor, "user_id", out var predictorId) ? predictorId : string.Empty,
+									new PredictorResult(won > 0 ? "WIN" : "UNKNOWN", won, true),
+									TryGetString(predictor, "user_name", out var predictorName) ? predictorName : string.Empty));
+							}
+						}
+
+						outcomes.Add(new Outcome(
+							TryGetString(outcome, "id", out var outcomeId) ? outcomeId : string.Empty,
+							TryGetString(outcome, "color", out var color) ? color : string.Empty,
+							TryGetString(outcome, "title", out var outcomeTitle) ? outcomeTitle : string.Empty,
+							TryGetUInt(outcome, "channel_points"),
+							TryGetUInt(outcome, "users"),
+							topPredictors,
+							new PredictionBadge(string.Empty, string.Empty)));
+					}
+				}
+
+				var createdBy = new PredictionUser("user", channelId, TryGetString(ev, "broadcaster_user_name", out var broadcasterName) ? broadcasterName : string.Empty, null);
+				var endedAt = TryGetDateTime(ev, "ended_at")?.UtcDateTime;
+				var lockedAt = TryGetDateTime(ev, "locks_at")?.UtcDateTime;
+				var predictionData = new PredictionData(
+					TryGetString(ev, "id", out var predictionId) ? predictionId : string.Empty,
+					channelId,
+					TryGetString(ev, "title", out var predictionTitle) ? predictionTitle : string.Empty,
+					(TryGetDateTime(ev, "created_at") ?? DateTimeOffset.UtcNow).UtcDateTime,
+					createdBy,
+					endedAt,
+					endedAt.HasValue ? createdBy : (PredictionUser?)null,
+					lockedAt,
+					lockedAt.HasValue ? createdBy : (PredictionUser?)null,
+					outcomes,
+					TryGetUInt(ev, "prediction_window_seconds"),
+					ParsePredictionStatus(TryGetString(ev, "status", out var statusRaw) ? statusRaw : null),
+					TryGetString(ev, "winning_outcome_id", out var winningOutcomeId) ? winningOutcomeId : null);
+
+				OnPrediction?.Invoke(channelId, predictionData);
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle channel.prediction.*");
+			}
+		}
+
+		private void HandleRewardRedeem(string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var ev = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				if (!TryGetString(ev, "broadcaster_user_id", out var channelId) || !ev.TryGetProperty("reward", out var rewardElement))
+				{
+					return;
+				}
+
+				var user = new RewardUser(
+					TryGetString(ev, "user_id", out var userId) ? userId : string.Empty,
+					TryGetString(ev, "user_login", out var userLogin) ? userLogin : string.Empty,
+					TryGetString(ev, "user_name", out var userName) ? userName : string.Empty);
+
+				var reward = new Reward(
+					TryGetString(rewardElement, "id", out var rewardId) ? rewardId : string.Empty,
+					channelId,
+					TryGetString(rewardElement, "title", out var rewardTitle) ? rewardTitle : string.Empty,
+					TryGetString(rewardElement, "prompt", out var prompt) ? prompt : string.Empty,
+					(int)TryGetUInt(rewardElement, "cost"),
+					false,
+					false,
+					new object(),
+					new DefaultImage(string.Empty, string.Empty, string.Empty),
+					"#000000",
+					true,
+					false,
+					true,
+					new MaxPerStream(false, 0),
+					false,
+					string.Empty,
+					DateTimeOffset.UtcNow,
+					new MaxPerUserPerStream(false, 0),
+					new GlobalCooldown(false, 0),
+					null);
+
+				var data = new RewardRedeemedData(
+					TryGetString(ev, "id", out var redemptionId) ? redemptionId : string.Empty,
+					user,
+					channelId,
+					TryGetString(ev, "redeemed_at", out var redeemedAtRaw) ? redeemedAtRaw : DateTimeOffset.UtcNow.ToString("O"),
+					reward,
+					TryGetString(ev, "status", out var status) ? status : "fulfilled");
+
+				OnRewardRedeemed?.Invoke(channelId, data);
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle channel.channel_points_custom_reward_redemption.add");
 			}
 		}
 
@@ -591,24 +947,39 @@ namespace CatCore.Services.Twitch
 				return;
 			}
 
-			var condition = new Dictionary<string, string>
+			var loggedInUserId = _loggedInUser.Value.UserId;
+			var subscriptionRequests = new List<(string type, string version, Dictionary<string, string> condition)>
 			{
-				{ "broadcaster_user_id", channelId },
-				{ "user_id", _loggedInUser.Value.UserId }
+				(SUB_TYPE_CHANNEL_CHAT_MESSAGE, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId }, { "user_id", loggedInUserId } }),
+				(SUB_TYPE_CHANNEL_CHAT_NOTIFICATION, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId }, { "user_id", loggedInUserId } }),
+				(SUB_TYPE_CHANNEL_CHAT_MESSAGE_DELETE, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId }, { "user_id", loggedInUserId } }),
+				(SUB_TYPE_CHANNEL_CHAT_CLEAR, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId }, { "user_id", loggedInUserId } }),
+				(SUB_TYPE_CHANNEL_CHAT_SETTINGS_UPDATE, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId }, { "user_id", loggedInUserId } }),
+				(SUB_TYPE_STREAM_ONLINE, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_STREAM_OFFLINE, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_AD_BREAK_BEGIN, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_FOLLOW, EVENTSUB_VERSION_FOLLOW, new Dictionary<string, string> { { "broadcaster_user_id", channelId }, { "moderator_user_id", loggedInUserId } }),
+				(SUB_TYPE_CHANNEL_POLL_BEGIN, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_POLL_PROGRESS, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_POLL_END, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_PREDICTION_BEGIN, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_PREDICTION_PROGRESS, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_PREDICTION_LOCK, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_PREDICTION_END, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } }),
+				(SUB_TYPE_CHANNEL_REWARD_REDEEM, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } })
 			};
-			var subscriptionTypes = new[] { SUB_TYPE_CHANNEL_CHAT_MESSAGE, SUB_TYPE_CHANNEL_CHAT_NOTIFICATION, SUB_TYPE_CHANNEL_CHAT_MESSAGE_DELETE, SUB_TYPE_CHANNEL_CHAT_CLEAR, SUB_TYPE_CHANNEL_CHAT_SETTINGS_UPDATE };
 
 			var subscriptionIds = new List<string>();
-			foreach (var subType in subscriptionTypes)
+			foreach (var request in subscriptionRequests)
 			{
-				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(subType, EVENTSUB_VERSION, condition, _sessionId).ConfigureAwait(false);
+				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(request.type, request.version, request.condition, _sessionId).ConfigureAwait(false);
 				if (subscriptionId != null)
 				{
 					subscriptionIds.Add(subscriptionId);
 				}
 				else
 				{
-					_logger.Warning("Failed to create EventSub subscription type {SubscriptionType} for channel {ChannelId}", subType, channelId);
+					_logger.Warning("Failed to create EventSub subscription type {SubscriptionType} for channel {ChannelId}", request.type, channelId);
 				}
 			}
 
@@ -628,8 +999,98 @@ namespace CatCore.Services.Twitch
 			}
 			else
 			{
-				_logger.Warning("Failed to create EventSub subscriptions for channel {ChannelId}. AttemptedTypes={AttemptedTypes}", channelId, string.Join(",", subscriptionTypes));
+				_logger.Warning("Failed to create EventSub subscriptions for channel {ChannelId}. AttemptedTypes={AttemptedTypes}", channelId, string.Join(",", subscriptionRequests.Select(x => x.type)));
 			}
+		}
+
+		private static string ToLegacyServerTimeRaw(DateTimeOffset value)
+		{
+			var unixMicros = value.ToUnixTimeMilliseconds() * 1000L;
+			return $"{unixMicros / 1000000}.{unixMicros % 1000000:D6}";
+		}
+
+		private static bool TryGetString(JsonElement element, string propertyName, out string value)
+		{
+			if (element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.String)
+			{
+				value = property.GetString()!;
+				return true;
+			}
+
+			value = string.Empty;
+			return false;
+		}
+
+		private static bool TryGetBool(JsonElement element, string propertyName)
+		{
+			return element.TryGetProperty(propertyName, out var property) && property.ValueKind == JsonValueKind.True;
+		}
+
+		private static uint TryGetUInt(JsonElement element, string propertyName)
+		{
+			if (!element.TryGetProperty(propertyName, out var property))
+			{
+				return 0;
+			}
+
+			if (property.ValueKind == JsonValueKind.Number && property.TryGetUInt32(out var number))
+			{
+				return number;
+			}
+
+			return 0;
+		}
+
+		private static uint? TryGetNullableUInt(JsonElement element, string propertyName)
+		{
+			if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind == JsonValueKind.Null)
+			{
+				return null;
+			}
+
+			if (property.ValueKind == JsonValueKind.Number && property.TryGetUInt32(out var number))
+			{
+				return number;
+			}
+
+			return null;
+		}
+
+		private static DateTimeOffset? TryGetDateTime(JsonElement element, string propertyName)
+		{
+			if (!element.TryGetProperty(propertyName, out var property) || property.ValueKind != JsonValueKind.String)
+			{
+				return null;
+			}
+
+			var raw = property.GetString();
+			return DateTimeOffset.TryParse(raw, out var parsed) ? parsed : null;
+		}
+
+		private static PollStatus ParsePollStatus(string? status)
+		{
+			return status?.ToLowerInvariant() switch
+			{
+				"active" => PollStatus.Active,
+				"completed" => PollStatus.Completed,
+				"terminated" => PollStatus.Terminated,
+				"archived" => PollStatus.Archived,
+				"moderated" => PollStatus.Moderated,
+				_ => PollStatus.Invalid
+			};
+		}
+
+		private static PredictionStatus ParsePredictionStatus(string? status)
+		{
+			return status?.ToLowerInvariant() switch
+			{
+				"active" => PredictionStatus.Active,
+				"resolved" => PredictionStatus.Resolved,
+				"canceled" => PredictionStatus.Cancelled,
+				"cancelled" => PredictionStatus.Cancelled,
+				"locked" => PredictionStatus.Locked,
+				_ => PredictionStatus.Active
+			};
 		}
 
 		private async Task UnsubscribeFromChannelInternal(string channelId)
