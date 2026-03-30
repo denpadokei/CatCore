@@ -185,7 +185,7 @@ namespace CatCore.Services.Twitch.Media
 
 						// Find the position of this emote text in the message, starting from the current offset
 						// to correctly handle repeated emote text appearing multiple times.
-						var startIndex = message.IndexOf(fragment.Text, emoteSearchOffset);
+						var startIndex = message.IndexOf(fragment.Text, emoteSearchOffset, StringComparison.Ordinal);
 						if (startIndex >= 0)
 						{
 							var endIndex = startIndex + fragment.Text.Length - 1;
@@ -197,7 +197,7 @@ namespace CatCore.Services.Twitch.Media
 					else
 					{
 						// Advance the offset past non-emote fragments to keep position tracking accurate.
-						var fragStart = message.IndexOf(fragment.Text, emoteSearchOffset);
+						var fragStart = message.IndexOf(fragment.Text, emoteSearchOffset, StringComparison.Ordinal);
 						if (fragStart >= 0)
 						{
 							emoteSearchOffset = fragStart + fragment.Text.Length;
@@ -218,7 +218,7 @@ namespace CatCore.Services.Twitch.Media
 				var fragmentSearchOffset = 0;
 				foreach (var fragment in fragments)
 				{
-					var fragStart = message.IndexOf(fragment.Text, fragmentSearchOffset);
+					var fragStart = message.IndexOf(fragment.Text, fragmentSearchOffset, StringComparison.Ordinal);
 					if (fragStart >= 0)
 					{
 						fragmentSearchOffset = fragStart + fragment.Text.Length;
@@ -246,7 +246,7 @@ namespace CatCore.Services.Twitch.Media
 
 			foreach (var word in words)
 			{
-				var wordStartIndex = fullMessage.IndexOf(word, searchStartIndex);
+				var wordStartIndex = fullMessage.IndexOf(word, searchStartIndex, StringComparison.Ordinal);
 				if (wordStartIndex < 0)
 				{
 					continue;

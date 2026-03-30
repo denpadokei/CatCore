@@ -276,8 +276,6 @@ namespace CatCore.Services.Twitch
 
 		private Task DisconnectHappenedHandler()
 		{
-			_reconnectUrl = null;
-
 			return Task.CompletedTask;
 		}
 
@@ -305,8 +303,7 @@ namespace CatCore.Services.Twitch
 					return;
 				}
 
-				using var metadataDocument = JsonDocument.Parse(metadataElement.GetRawText());
-				var metadata = JsonSerializer.Deserialize(metadataDocument.RootElement, TwitchEventSubSerializerContext.Default.EventSubMetadata);
+				var metadata = JsonSerializer.Deserialize(metadataElement, TwitchEventSubSerializerContext.Default.EventSubMetadata);
 
 				HandleEventSubMessage(metadata, rawMessage);
 			}
@@ -380,8 +377,29 @@ namespace CatCore.Services.Twitch
 
 				_logger.Information("EventSub session reconnect requested. New URL: {ReconnectUrl}", _reconnectUrl);
 
-				// Disconnect current connection (will trigger reconnect with new URL)
-				_ = Task.Run(() => _kittenWebSocketProvider.Disconnect("session_reconnect"));
+				// Establish a new connection using the reconnect URL, then drop the old one per EventSub reconnect semantics.
+				_ = Task.Run(async () =>
+				{
+					try
+					{
+						// Connect to the new URL (_reconnectUrl is already set, StartInternal will use it)
+						await StartInternal().ConfigureAwait(false);
+					}
+					catch (Exception ex)
+					{
+						_logger.Warning(ex, "Failed to start new EventSub session during session_reconnect");
+					}
+
+					try
+					{
+						// Disconnect old connection after attempting to bring up the new one
+						await _kittenWebSocketProvider.Disconnect("session_reconnect").ConfigureAwait(false);
+					}
+					catch (Exception ex)
+					{
+						_logger.Warning(ex, "Failed to disconnect old EventSub session during session_reconnect");
+					}
+				});
 			}
 			catch (Exception ex)
 			{
@@ -985,6 +1003,7 @@ namespace CatCore.Services.Twitch
 			};
 
 			var subscriptionIds = new List<string>();
+			var allSucceeded = true;
 			foreach (var request in subscriptionRequests)
 			{
 				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(request.type, request.version, request.condition, _sessionId).ConfigureAwait(false);
@@ -995,12 +1014,14 @@ namespace CatCore.Services.Twitch
 				else
 				{
 					_logger.Warning("Failed to create EventSub subscription type {SubscriptionType} for channel {ChannelId}", request.type, channelId);
+					allSucceeded = false;
 				}
 			}
 
-			if (subscriptionIds.Count > 0)
+			if (subscriptionIds.Count > 0 && allSucceeded)
 			{
-				// Delete any existing subscriptions for this channel before replacing to avoid leaks.
+				// Only delete existing subscriptions and replace when ALL new ones were created successfully,
+				// to avoid silently reducing coverage for the channel on partial failure.
 				if (_channelSubscriptionIds.TryRemove(channelId, out var existingSubscriptionIds))
 				{
 					foreach (var existingId in existingSubscriptionIds)
@@ -1012,9 +1033,22 @@ namespace CatCore.Services.Twitch
 				_channelSubscriptionIds[channelId] = subscriptionIds;
 				OnJoinChannel?.Invoke(new TwitchChannel(this, channelId, channelName));
 			}
-			else
+			else if (subscriptionIds.Count == 0)
 			{
 				_logger.Warning("Failed to create EventSub subscriptions for channel {ChannelId}. AttemptedTypes={AttemptedTypes}", channelId, string.Join(",", subscriptionRequests.Select(x => x.type)));
+			}
+			else
+			{
+				// Partial failure: clean up the newly created subscriptions to avoid leaks.
+				_logger.Warning("Partial failure creating EventSub subscriptions for channel {ChannelId}. Rolling back {Count} created subscriptions.", channelId, subscriptionIds.Count);
+				foreach (var subscriptionId in subscriptionIds)
+				{
+					var deleted = await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
+					if (!deleted)
+					{
+						_logger.Warning("Failed to delete EventSub subscription {SubscriptionId} during rollback for channel {ChannelId}", subscriptionId, channelId);
+					}
+				}
 			}
 		}
 
