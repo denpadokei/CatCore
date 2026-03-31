@@ -35,6 +35,7 @@ namespace CatCore.Services.Twitch
 			"chat:edit",
 			"chat:read",
 			"user:read:chat",
+			"user:write:chat",
 			"user:bot",
 			"channel:bot",
 			"channel:manage:broadcast",
