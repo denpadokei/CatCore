@@ -12,6 +12,7 @@ using CatCore.Models.EventArgs;
 using CatCore.Models.Shared;
 using CatCore.Models.Twitch;
 using CatCore.Models.Twitch.EventSub;
+using CatCore.Models.Twitch.Helix.Responses;
 using CatCore.Models.Twitch.IRC;
 using CatCore.Models.Twitch.OAuth;
 using CatCore.Models.Twitch.PubSub.Responses;
@@ -75,6 +76,7 @@ namespace CatCore.Services.Twitch
 		// channelId → subscriptionIds[]
 		private readonly ConcurrentDictionary<string, List<string>> _channelSubscriptionIds;
 		private readonly ConcurrentDictionary<Action<string, ViewCountUpdate>, bool> _viewCountCallbackRegistrations = new();
+		private readonly ConcurrentDictionary<string, string> _profileImageUrlCache = new(StringComparer.OrdinalIgnoreCase);
 
 		private readonly SemaphoreSlim _connectionLockerSemaphoreSlim = new(1, 1);
 		private readonly object _viewCountPollingStateLock = new();
@@ -744,6 +746,7 @@ namespace CatCore.Services.Twitch
 
 				var ev = payload.Event;
 				var channel = new TwitchChannel(this, ev.BroadcasterUserId, ev.BroadcasterUserLogin);
+				var chatterColor = NormalizeHexColorOrDefault(ev.Color, "#FFFFFF");
 
 				// Build badges
 				var badgeEntries = new List<IChatBadge>();
@@ -761,7 +764,7 @@ namespace CatCore.Services.Twitch
 					ev.ChatterUserId,
 					ev.ChatterUserLogin,
 					ev.ChatterUserName,
-					ev.Color,
+					chatterColor,
 					ev.Badges?.Any(b => b.SetId == "moderator") ?? false,
 					ev.Badges?.Any(b => b.SetId == "broadcaster") ?? false,
 					ev.Badges?.Any(b => b.SetId == "subscriber" || b.SetId == "founder") ?? false,
@@ -820,6 +823,13 @@ namespace CatCore.Services.Twitch
 
 				var ev = payload.Event;
 				var channel = new TwitchChannel(this, ev.BroadcasterUserId, ev.BroadcasterUserLogin);
+				var userMessageText = ev.Message.Text ?? string.Empty;
+				var notificationText = ResolveNotificationText(ev);
+				var notificationMetadata = BuildLegacyUserNoticeMetadata(ev, notificationText);
+				if (string.IsNullOrWhiteSpace(notificationText))
+				{
+					_logger.Warning("EventSub notification text resolved empty for notice type {NoticeType}", ev.NoticeType);
+				}
 
 				// Build user
 				var user = new TwitchUser(
@@ -837,7 +847,7 @@ namespace CatCore.Services.Twitch
 
 				// Extract emotes
 				var emotes = _twitchEmoteDetectionHelper.ExtractEmoteInfoFromFragments(
-					ev.Message.Text,
+					userMessageText,
 					ev.Message.Fragments,
 					ev.BroadcasterUserId,
 					0
@@ -848,11 +858,11 @@ namespace CatCore.Services.Twitch
 					true, // IsSystemMessage
 					false,
 					false,
-					ev.Message.Text,
+					userMessageText,
 					user,
 					channel,
 					emotes.AsReadOnly(),
-					null,
+					notificationMetadata,
 					"USERNOTICE",
 					0
 				);
@@ -863,6 +873,234 @@ namespace CatCore.Services.Twitch
 			{
 				_logger.Warning(ex, "Failed to handle channel.chat.notification");
 			}
+		}
+
+		private ReadOnlyDictionary<string, string> BuildLegacyUserNoticeMetadata(EventSubChatNotificationEvent ev, string notificationText)
+		{
+			var metadataLogin = ev.ChatterUserLogin;
+			var metadataDisplayName = ev.ChatterUserName;
+			var profileLookupUserId = ev.ChatterUserId;
+
+			if (ev.Raid.HasValue)
+			{
+				if (!string.IsNullOrWhiteSpace(ev.Raid.Value.UserLogin))
+				{
+					metadataLogin = ev.Raid.Value.UserLogin;
+				}
+
+				if (!string.IsNullOrWhiteSpace(ev.Raid.Value.UserName))
+				{
+					metadataDisplayName = ev.Raid.Value.UserName;
+				}
+
+				if (!string.IsNullOrWhiteSpace(ev.Raid.Value.UserId))
+				{
+					profileLookupUserId = ev.Raid.Value.UserId;
+				}
+			}
+
+			var metadata = new Dictionary<string, string>(StringComparer.Ordinal)
+			{
+				[IrcMessageTags.MSG_ID] = string.IsNullOrWhiteSpace(ev.NoticeType) ? "usernotice" : ev.NoticeType,
+				[IrcMessageTags.SYSTEM_MSG] = EscapeLegacyIrcSystemMessage(notificationText)
+			};
+
+			if (!string.IsNullOrWhiteSpace(metadataLogin))
+			{
+				metadata[IrcMessageTags.MSG_PARAM_LOGIN] = metadataLogin;
+			}
+
+			if (!string.IsNullOrWhiteSpace(metadataDisplayName))
+			{
+				metadata[IrcMessageTags.MSG_PARAM_DISPLAY_NAME] = metadataDisplayName;
+			}
+
+			var profileImageUrl = TryResolveProfileImageUrl(metadataLogin, profileLookupUserId);
+			if (profileImageUrl is { Length: > 0 })
+			{
+				metadata[IrcMessageTags.MSG_PARAM_PROFILE_IMAGE_URL] = profileImageUrl;
+			}
+
+			if (ev.Raid.HasValue)
+			{
+				metadata[IrcMessageTags.MSG_PARAM_VIEWER_COUNT] = ev.Raid.Value.ViewerCount.ToString();
+			}
+
+			if (ev.Sub.HasValue)
+			{
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ev.Sub.Value.SubTier;
+			}
+
+			if (ev.Resub.HasValue)
+			{
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ev.Resub.Value.SubTier;
+				metadata[IrcMessageTags.MSG_PARAM_CUMULATIVE_MONTHS] = ev.Resub.Value.CumulativeMonths.ToString();
+				metadata[IrcMessageTags.MSG_PARAM_MONTHS] = ev.Resub.Value.DurationMonths.ToString();
+			}
+
+			if (ev.GiftSub.HasValue)
+			{
+				if (!string.IsNullOrWhiteSpace(ev.GiftSub.Value.RecipientUserName))
+				{
+					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_USER_NAME] = ev.GiftSub.Value.RecipientUserName;
+					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_DISPLAY_NAME] = ev.GiftSub.Value.RecipientUserName;
+				}
+
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ev.GiftSub.Value.SubTier;
+			}
+
+			return new ReadOnlyDictionary<string, string>(metadata);
+		}
+
+		private string? TryResolveProfileImageUrl(string? loginName, string? userId)
+		{
+			if (!string.IsNullOrWhiteSpace(userId) && _profileImageUrlCache.TryGetValue($"id:{userId}", out var cachedById))
+			{
+				return cachedById;
+			}
+
+			if (!string.IsNullOrWhiteSpace(loginName) && _profileImageUrlCache.TryGetValue($"login:{loginName}", out var cachedByLogin))
+			{
+				return cachedByLogin;
+			}
+
+			try
+			{
+				ResponseBase<UserData>? userInfo = null;
+
+				if (!string.IsNullOrWhiteSpace(userId))
+				{
+					userInfo = _twitchHelixApiService.FetchUserInfo(userIds: new[] { userId! }).ConfigureAwait(false).GetAwaiter().GetResult();
+				}
+
+				if ((userInfo?.Data?.Count ?? 0) == 0 && !string.IsNullOrWhiteSpace(loginName))
+				{
+					userInfo = _twitchHelixApiService.FetchUserInfo(loginNames: new[] { loginName! }).ConfigureAwait(false).GetAwaiter().GetResult();
+				}
+
+				var user = userInfo?.Data?.FirstOrDefault();
+				if (!user.HasValue || string.IsNullOrWhiteSpace(user.Value.ProfileImageUrl))
+				{
+					return null;
+				}
+
+				var userValue = user.Value;
+				var profileImageUrl = userValue.ProfileImageUrl;
+				if (!string.IsNullOrWhiteSpace(userValue.UserId))
+				{
+					_profileImageUrlCache[$"id:{userValue.UserId}"] = profileImageUrl;
+				}
+
+				if (!string.IsNullOrWhiteSpace(userValue.LoginName))
+				{
+					_profileImageUrlCache[$"login:{userValue.LoginName}"] = profileImageUrl;
+				}
+
+				return profileImageUrl;
+			}
+			catch (Exception ex)
+			{
+				_logger.Verbose(ex, "Failed to resolve profile image URL for login={LoginName}, userId={UserId}", loginName, userId);
+				return null;
+			}
+		}
+
+		private static string EscapeLegacyIrcSystemMessage(string value)
+		{
+			if (string.IsNullOrEmpty(value))
+			{
+				return string.Empty;
+			}
+
+			return value.Replace(" ", "\\s");
+		}
+
+		private static string ResolveNotificationText(EventSubChatNotificationEvent ev)
+		{
+			if (!string.IsNullOrWhiteSpace(ev.Message.Text))
+			{
+				return ev.Message.Text;
+			}
+
+			if (!string.IsNullOrWhiteSpace(ev.SystemMessage))
+			{
+				return ev.SystemMessage ?? string.Empty;
+			}
+
+			return ev.NoticeType switch
+			{
+				"raid" => BuildRaidNotificationText(ev),
+				"sub" => $"{GetPreferredDisplayName(ev)} subscribed.",
+				"resub" => BuildResubNotificationText(ev),
+				"gift_sub" => BuildGiftSubNotificationText(ev),
+				"pay_it_forward" => $"{GetPreferredDisplayName(ev)} paid a gift forward.",
+				"bits_badge_tier" => BuildBitsBadgeTierNotificationText(ev),
+				"announcement" => GetPreferredDisplayName(ev),
+				"unraid" => $"{GetPreferredDisplayName(ev)} canceled the raid.",
+				_ => string.Empty
+			};
+		}
+
+		private static string BuildRaidNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var raiderName = ev.Raid?.UserName;
+			if (string.IsNullOrWhiteSpace(raiderName))
+			{
+				raiderName = GetPreferredDisplayName(ev);
+			}
+
+			var viewerCount = ev.Raid?.ViewerCount ?? 0;
+			var viewerLabel = viewerCount == 1 ? "viewer" : "viewers";
+			return viewerCount > 0
+				? $"{raiderName} is raiding with a party of {viewerCount} {viewerLabel}."
+				: $"{raiderName} is raiding.";
+		}
+
+		private static string BuildResubNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var userName = GetPreferredDisplayName(ev);
+			var cumulativeMonths = ev.Resub?.CumulativeMonths ?? 0;
+			return cumulativeMonths > 0
+				? $"{userName} subscribed for {cumulativeMonths} months."
+				: $"{userName} resubscribed.";
+		}
+
+		private static string BuildGiftSubNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var gifterName = GetPreferredDisplayName(ev);
+			var recipientName = ev.GiftSub?.RecipientUserName;
+			return !string.IsNullOrWhiteSpace(recipientName)
+				? $"{gifterName} gifted a sub to {recipientName}."
+				: $"{gifterName} gifted a subscription.";
+		}
+
+		private static string BuildBitsBadgeTierNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var userName = GetPreferredDisplayName(ev);
+			var tier = ev.BitsBadgeTier?.Tier ?? 0;
+			return tier > 0
+				? $"{userName} reached Bits badge tier {tier}."
+				: $"{userName} reached a new Bits badge tier.";
+		}
+
+		private static string GetPreferredDisplayName(EventSubChatNotificationEvent ev)
+		{
+			if (!string.IsNullOrWhiteSpace(ev.ChatterUserName))
+			{
+				return ev.ChatterUserName;
+			}
+
+			if (!string.IsNullOrWhiteSpace(ev.ChatterUserLogin))
+			{
+				return ev.ChatterUserLogin;
+			}
+
+			if (!string.IsNullOrWhiteSpace(ev.Raid?.UserName))
+			{
+				return ev.Raid?.UserName ?? string.Empty;
+			}
+
+			return string.Empty;
 		}
 
 		private void HandleMessageDelete(string rawMessage)
@@ -1004,7 +1242,7 @@ namespace CatCore.Services.Twitch
 			};
 
 			var subscriptionIds = new List<string>();
-			var allSucceeded = true;
+			var failedTypes = new List<string>();
 			foreach (var request in subscriptionRequests)
 			{
 				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(request.type, request.version, request.condition, _sessionId).ConfigureAwait(false);
@@ -1015,14 +1253,14 @@ namespace CatCore.Services.Twitch
 				else
 				{
 					_logger.Warning("Failed to create EventSub subscription type {SubscriptionType} for channel {ChannelId}", request.type, channelId);
-					allSucceeded = false;
+					failedTypes.Add(request.type);
 				}
 			}
 
-			if (subscriptionIds.Count > 0 && allSucceeded)
+			if (subscriptionIds.Count > 0)
 			{
-				// Only delete existing subscriptions and replace when ALL new ones were created successfully,
-				// to avoid silently reducing coverage for the channel on partial failure.
+				// Replace existing subscriptions with the successfully created set.
+				// Some EventSub types may fail due to missing optional scopes, but chat should remain functional.
 				if (_channelSubscriptionIds.TryRemove(channelId, out var existingSubscriptionIds))
 				{
 					foreach (var existingId in existingSubscriptionIds)
@@ -1032,24 +1270,16 @@ namespace CatCore.Services.Twitch
 				}
 
 				_channelSubscriptionIds[channelId] = subscriptionIds;
+				if (failedTypes.Count > 0)
+				{
+					_logger.Warning("EventSub subscriptions partially created for channel {ChannelId}. Created={CreatedCount}, FailedTypes={FailedTypes}",
+						channelId, subscriptionIds.Count, string.Join(",", failedTypes));
+				}
 				OnJoinChannel?.Invoke(new TwitchChannel(this, channelId, channelName));
 			}
 			else if (subscriptionIds.Count == 0)
 			{
 				_logger.Warning("Failed to create EventSub subscriptions for channel {ChannelId}. AttemptedTypes={AttemptedTypes}", channelId, string.Join(",", subscriptionRequests.Select(x => x.type)));
-			}
-			else
-			{
-				// Partial failure: clean up the newly created subscriptions to avoid leaks.
-				_logger.Warning("Partial failure creating EventSub subscriptions for channel {ChannelId}. Rolling back {Count} created subscriptions.", channelId, subscriptionIds.Count);
-				foreach (var subscriptionId in subscriptionIds)
-				{
-					var deleted = await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
-					if (!deleted)
-					{
-						_logger.Warning("Failed to delete EventSub subscription {SubscriptionId} during rollback for channel {ChannelId}", subscriptionId, channelId);
-					}
-				}
 			}
 		}
 
@@ -1057,6 +1287,27 @@ namespace CatCore.Services.Twitch
 		{
 			var unixMicros = value.ToUnixTimeMilliseconds() * 1000L;
 			return $"{unixMicros / 1000000}.{unixMicros % 1000000:D6}";
+		}
+
+		private static string NormalizeHexColorOrDefault(string? rawColor, string fallback)
+		{
+			if (string.IsNullOrWhiteSpace(rawColor))
+			{
+				return fallback;
+			}
+
+			var color = rawColor!.Trim();
+			if (color.Length == 7 && color[0] == '#')
+			{
+				return color;
+			}
+
+			if (color.Length == 6)
+			{
+				return "#" + color;
+			}
+
+			return fallback;
 		}
 
 		private static bool TryGetString(JsonElement element, string propertyName, out string value)

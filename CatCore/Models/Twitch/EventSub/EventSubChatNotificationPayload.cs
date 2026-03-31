@@ -40,6 +40,9 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("message")]
 		public EventSubChatMessageContent Message { get; init; }
 
+		[JsonPropertyName("system_message")]
+		public string? SystemMessage { get; init; }
+
 		[JsonPropertyName("sub")]
 		public EventSubNotificationSub? Sub { get; init; }
 
