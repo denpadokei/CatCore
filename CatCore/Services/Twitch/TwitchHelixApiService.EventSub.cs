@@ -123,7 +123,7 @@ namespace CatCore.Services.Twitch
 				var responseJson = await httpResponseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 				var response = JsonSerializer.Deserialize(responseJson, TwitchHelixSerializerContext.Default.EventSubSubscriptionResponseDto);
 
-				if (response == null)
+				if (EqualityComparer<EventSubSubscriptionResponseDto>.Default.Equals(response, default))
 				{
 					_logger.Warning("Failed to deserialize EventSub subscription response. Type={Type}, Payload={Payload}", type, responseJson);
 					return null;

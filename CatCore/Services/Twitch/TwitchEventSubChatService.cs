@@ -269,9 +269,10 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		private async Task ConnectHappenedHandler(WebSocketConnection webSocketConnection)
+		private Task ConnectHappenedHandler(WebSocketConnection webSocketConnection)
 		{
 			_logger.Verbose("EventSub WebSocket connect handler triggered");
+			return Task.CompletedTask;
 		}
 
 		private Task DisconnectHappenedHandler()
