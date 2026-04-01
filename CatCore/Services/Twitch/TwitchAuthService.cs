@@ -1,7 +1,8 @@
-﻿using System;
+using System;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
@@ -33,19 +34,32 @@ namespace CatCore.Services.Twitch
 			"bits:read",
 			"chat:edit",
 			"chat:read",
+			"user:read:chat",
+			"user:write:chat",
+			"user:bot",
+			"channel:bot",
 			"channel:manage:broadcast",
 			"channel:manage:polls",
 			"channel:manage:predictions",
 			"channel:manage:raids",
 			"channel:manage:redemptions",
 			"channel:moderate",
+			"channel:read:ads",
 			"channel:read:subscriptions",
 			"moderator:manage:announcements",
 			"moderator:manage:banned_users",
 			"moderator:manage:chat_messages",
 			"moderator:manage:chat_settings",
+			"moderator:read:followers",
 			"user:manage:chat_color",
 			"user:read:follows"
+		};
+
+		private static readonly string[] _requiredEventSubChatScopes =
+		{
+			"user:read:chat",
+			"user:bot",
+			"channel:bot"
 		};
 
 		private readonly ILogger _logger;
@@ -145,7 +159,10 @@ namespace CatCore.Services.Twitch
 				try
 				{
 					var validateAccessToken = await ValidateAccessToken(Credentials, false).ConfigureAwait(false);
-					_logger.Information("Validated token: Is valid: {IsValid}, Is refreshable: {IsRefreshable}", validateAccessToken != null && TokenIsValid, Credentials.RefreshToken != null);
+					_logger.Information("Validated token: Is valid: {IsValid}, Is refreshable: {IsRefreshable}, Scopes: {Scopes}",
+						validateAccessToken != null && TokenIsValid,
+						Credentials.RefreshToken != null,
+						validateAccessToken?.Scopes == null ? "<none>" : string.Join(",", validateAccessToken.Value.Scopes));
 					if (validateAccessToken == null || !TokenIsValid)
 					{
 						_logger.Information("Refreshing tokens");
@@ -189,9 +206,10 @@ namespace CatCore.Services.Twitch
 
 				if (!responseMessage.IsSuccessStatusCode)
 				{
+					_logger.Warning($"Exchanging authorization code for credentials resulted in non-success status code: {responseMessage.StatusCode}");
 					return;
 				}
-
+				var contentString = responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
 
 				var newCredentials = new TwitchCredentials(authorizationResponse);
@@ -237,6 +255,35 @@ namespace CatCore.Services.Twitch
 			}
 
 			var validationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.ValidationResponse).ConfigureAwait(false);
+			if (validationResponse.Scopes == null)
+			{
+				if (resetDataOnFailure)
+				{
+					UpdateCredentials(TwitchCredentials.Empty());
+					_loggedInUser = null;
+				}
+
+				Status = AuthenticationStatus.Unauthorized;
+				_logger.Warning("Twitch token validation returned no scope information");
+				return null;
+			}
+
+			var missingScopes = _requiredEventSubChatScopes.Where(requiredScope => !validationResponse.Scopes.Contains(requiredScope)).ToArray();
+			if (missingScopes.Length > 0)
+			{
+				if (resetDataOnFailure)
+				{
+					UpdateCredentials(TwitchCredentials.Empty());
+					_loggedInUser = null;
+				}
+
+				Status = AuthenticationStatus.Unauthorized;
+				_logger.Warning("Twitch token is missing required EventSub chat scopes. Missing={MissingScopes}; Current={CurrentScopes}",
+					string.Join(",", missingScopes),
+					string.Join(",", validationResponse.Scopes));
+				return null;
+			}
+
 			_loggedInUser = validationResponse;
 
 			UpdateCredentials(credentials.ValidUntil!.Value > validationResponse.ExpiresIn

@@ -3,7 +3,7 @@
 	<PropertyGroup>
 		<TargetFramework>netstandard2.0</TargetFramework>
 		<OutputType>library</OutputType>
-		<LangVersion>9</LangVersion>
+		<LangVersion>11.0</LangVersion>
 		<Nullable>enable</Nullable>
 		<TreatWarningsAsErrors>true</TreatWarningsAsErrors>
 		<CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
@@ -24,7 +24,7 @@
 		<Title>CatCore</Title>
 		<Description>CatCore is a .NET Standard 2.0 library which provides a shared connection to mods and other applications for Twitch (and other future streaming platforms).</Description>
 		<Authors>Eris</Authors>
-		<Version>1.1.0</Version>
+		<Version>1.1.1-alpha5</Version>
 		<Copyright>Copyright © Eris 2023</Copyright>
 		<PackageProjectUrl>https://github.com/ErisApps/CatCore</PackageProjectUrl>
 	</PropertyGroup>
@@ -39,7 +39,7 @@
 		<PackageReference Include="Serilog.Sinks.Async" Version="1.5.0" />
 		<PackageReference Include="System.Net.Http.Json" Version="7.0.0" />
 		<PackageReference Include="System.Reactive" Version="5.0.0" />
-		<PackageReference Include="System.Text.Json" Version="7.0.2" />
+		<PackageReference Include="System.Text.Json" Version="8.0.5" />
 		<PackageReference Include="WebsocketClientLite.PCL" Version="7.3.2" />
 	</ItemGroup>
 
