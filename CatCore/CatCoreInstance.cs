@@ -79,6 +79,10 @@ namespace CatCore
 			Log.Logger = new LoggerConfiguration()
 				.MinimumLevel.Verbose()
 				.Enrich.FromLogContext()
+#if DEBUG
+				.WriteTo.Async(writeTo => writeTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss.fff} {Level:u3} {SourceContext:l}] {Message:lj}{NewLine}{Exception}",
+					theme: Serilog.Sinks.SystemConsole.Themes.SystemConsoleTheme.Colored))
+#endif
 				.WriteTo.Conditional(_ => OnLogReceived != null, writeTo => writeTo.Async(
 					writeToInternal => writeToInternal.Actionable(evt =>
 					{
