@@ -5,7 +5,7 @@ using JetBrains.Annotations;
 namespace CatCore.Models.Twitch.Helix.Requests
 {
 	[PublicAPI]
-	internal record struct SendChatMessageRequestDto
+	internal struct SendChatMessageRequestDto
 	{
 		[JsonPropertyName("broadcaster_id")]
 		public string BroadcasterId { get; init; }
@@ -22,7 +22,7 @@ namespace CatCore.Models.Twitch.Helix.Requests
 	}
 
 	[PublicAPI]
-	internal record struct EventSubSubscriptionRequestDto
+	internal struct EventSubSubscriptionRequestDto
 	{
 		[JsonPropertyName("type")]
 		public string Type { get; init; }
@@ -38,7 +38,7 @@ namespace CatCore.Models.Twitch.Helix.Requests
 	}
 
 	[PublicAPI]
-	internal record struct EventSubTransportDto
+	internal struct EventSubTransportDto
 	{
 		[JsonPropertyName("method")]
 		public string Method { get; init; }

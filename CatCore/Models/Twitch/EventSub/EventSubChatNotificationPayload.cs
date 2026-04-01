@@ -4,7 +4,7 @@ using JetBrains.Annotations;
 
 namespace CatCore.Models.Twitch.EventSub
 {
-	internal record struct EventSubChatNotificationPayload
+	internal struct EventSubChatNotificationPayload
 	{
 		[JsonPropertyName("subscription")]
 		public EventSubSubscription Subscription { get; init; }
@@ -14,7 +14,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubChatNotificationEvent
+	public struct EventSubChatNotificationEvent
 	{
 		[JsonPropertyName("broadcaster_user_id")]
 		public string BroadcasterUserId { get; init; }
@@ -69,7 +69,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationSub
+	public struct EventSubNotificationSub
 	{
 		[JsonPropertyName("is_gift")]
 		public bool IsGift { get; init; }
@@ -82,7 +82,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationResub
+	public struct EventSubNotificationResub
 	{
 		[JsonPropertyName("duration_months")]
 		public int DurationMonths { get; init; }
@@ -101,7 +101,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationGiftSub
+	public struct EventSubNotificationGiftSub
 	{
 		[JsonPropertyName("community_gift_id")]
 		public string? CommunityGiftId { get; init; }
@@ -129,7 +129,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationRaid
+	public struct EventSubNotificationRaid
 	{
 		[JsonPropertyName("user_id")]
 		public string UserId { get; init; }
@@ -145,12 +145,12 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationUnraid
+	public struct EventSubNotificationUnraid
 	{
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationPayItForward
+	public struct EventSubNotificationPayItForward
 	{
 		[JsonPropertyName("is_anonymous")]
 		public bool IsAnonymous { get; init; }
@@ -160,14 +160,14 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationAnnouncement
+	public struct EventSubNotificationAnnouncement
 	{
 		[JsonPropertyName("color")]
 		public string Color { get; init; }
 	}
 
 	[PublicAPI]
-	public record struct EventSubNotificationBitsBadgeTier
+	public struct EventSubNotificationBitsBadgeTier
 	{
 		[JsonPropertyName("tier")]
 		public int Tier { get; init; }

@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace CatCore.Models.Twitch.EventSub
 {
-	internal record struct EventSubMetadata
+	internal struct EventSubMetadata
 	{
 		[JsonPropertyName("message_id")]
 		public string MessageId { get; init; }
@@ -21,7 +21,7 @@ namespace CatCore.Models.Twitch.EventSub
 		public string SubscriptionVersion { get; init; }
 	}
 
-	internal record struct EventSubWebSocketMessage<TPayload> where TPayload : struct
+	internal struct EventSubWebSocketMessage<TPayload> where TPayload : struct
 	{
 		[JsonPropertyName("metadata")]
 		public EventSubMetadata Metadata { get; init; }
