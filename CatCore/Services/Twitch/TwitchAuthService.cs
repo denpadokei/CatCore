@@ -125,7 +125,7 @@ namespace CatCore.Services.Twitch
 
 			_exceptionRetryPolicy = Policy<HttpResponseMessage>
 				.Handle<HttpRequestException>()
-				.WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromMilliseconds(2 ^ (retryAttempt - 1) * 500));
+				.WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromMilliseconds((1 << (retryAttempt - 1)) * 500));
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -311,8 +311,9 @@ namespace CatCore.Services.Twitch
 			_logger.Information("Refreshing tokens using secure CatCore auth back-end");
 			try
 			{
+				var encodedRefreshToken = Uri.EscapeDataString(Credentials.RefreshToken);
 				using var responseMessage = await _exceptionRetryPolicy.ExecuteAsync(() => _catCoreAuthClient
-						.PostAsync($"{_constants.CatCoreAuthServerUri}api/twitch/refresh?refresh_token={Credentials.RefreshToken}", null))
+						.PostAsync($"{_constants.CatCoreAuthServerUri}api/twitch/refresh?refresh_token={encodedRefreshToken}", null))
 					.ConfigureAwait(false);
 
 				if (!responseMessage.IsSuccessStatusCode)
@@ -325,6 +326,16 @@ namespace CatCore.Services.Twitch
 
 				var refreshedCredentials = new TwitchCredentials(authorizationResponse);
 				return await ValidateAccessToken(refreshedCredentials).ConfigureAwait(false) != null;
+			}
+			catch (HttpRequestException ex)
+			{
+				_logger.Warning(ex, "An error occurred while trying to refresh tokens");
+				return false;
+			}
+			catch (TaskCanceledException ex)
+			{
+				_logger.Warning(ex, "Refreshing tokens timed out or was canceled");
+				return false;
 			}
 			catch (JsonException ex)
 			{
