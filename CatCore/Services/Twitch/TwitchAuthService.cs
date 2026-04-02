@@ -231,21 +231,7 @@ namespace CatCore.Services.Twitch
 			{
 				delay = TimeSpan.Zero;
 			}
-				_forcedRefreshTask = Task.Run(async () =>
-				{
-					try
-					{
-						await RunForcedRefreshSchedule(delay, cancellationTokenSource.Token).ConfigureAwait(false);
-					}
-			_logger.Information("Scheduled forced Twitch token refresh in {Delay}", delay);
-					{
-						// Expected cancellation, no action required.
-					}
-					catch (Exception ex)
-					{
-						_logger.Error(ex, "Unhandled exception in forced Twitch token refresh task.");
-					}
-				});
+
 			CancellationTokenSource? previousCancellationTokenSource;
 			CancellationTokenSource cancellationTokenSource;
 			lock (_forcedRefreshStateLock)
@@ -377,8 +363,14 @@ namespace CatCore.Services.Twitch
 					_logger.Warning($"Exchanging authorization code for credentials resulted in non-success status code: {responseMessage.StatusCode}");
 					return;
 				}
-				var contentString = responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+#if DEBUG
+				var contentString = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+				_logger.Debug("Twitch authorization response payload: {Payload}", contentString);
+				var authorizationResponse = JsonSerializer.Deserialize(contentString, TwitchAuthSerializerContext.Default.AuthorizationResponse);
+#else
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
+#endif
 
 				var newCredentials = new TwitchCredentials(authorizationResponse);
 				await ValidateAccessToken(newCredentials).ConfigureAwait(false);
