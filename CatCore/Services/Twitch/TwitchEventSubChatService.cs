@@ -380,27 +380,17 @@ namespace CatCore.Services.Twitch
 
 				_logger.Information("EventSub session reconnect requested. New URL: {ReconnectUrl}", _reconnectUrl);
 
-				// Establish a new connection using the reconnect URL, then drop the old one per EventSub reconnect semantics.
+				// Connect to the new URL. KittenWebSocketProvider.Connect already calls Disconnect() first,
+				// so there is no need to explicitly disconnect the old session after StartInternal returns.
 				_ = Task.Run(async () =>
 				{
 					try
 					{
-						// Connect to the new URL (_reconnectUrl is already set, StartInternal will use it)
 						await StartInternal().ConfigureAwait(false);
 					}
 					catch (Exception ex)
 					{
 						_logger.Warning(ex, "Failed to start new EventSub session during session_reconnect");
-					}
-
-					try
-					{
-						// Disconnect old connection after attempting to bring up the new one
-						await _kittenWebSocketProvider.Disconnect("session_reconnect").ConfigureAwait(false);
-					}
-					catch (Exception ex)
-					{
-						_logger.Warning(ex, "Failed to disconnect old EventSub session during session_reconnect");
 					}
 				});
 			}
@@ -964,45 +954,52 @@ namespace CatCore.Services.Twitch
 				return cachedByLogin;
 			}
 
-			try
+			// Perform Helix lookup in a background task to avoid blocking the calling thread.
+			if (!string.IsNullOrWhiteSpace(userId) || !string.IsNullOrWhiteSpace(loginName))
 			{
-				ResponseBase<UserData>? userInfo = null;
-
-				if (!string.IsNullOrWhiteSpace(userId))
+				_ = Task.Run(async () =>
 				{
-					userInfo = _twitchHelixApiService.FetchUserInfo(userIds: new[] { userId! }).ConfigureAwait(false).GetAwaiter().GetResult();
-				}
+					try
+					{
+						ResponseBase<UserData>? userInfo = null;
 
-				if ((userInfo?.Data?.Count ?? 0) == 0 && !string.IsNullOrWhiteSpace(loginName))
-				{
-					userInfo = _twitchHelixApiService.FetchUserInfo(loginNames: new[] { loginName! }).ConfigureAwait(false).GetAwaiter().GetResult();
-				}
+						if (!string.IsNullOrWhiteSpace(userId))
+						{
+							userInfo = await _twitchHelixApiService.FetchUserInfo(userIds: new[] { userId! }).ConfigureAwait(false);
+						}
 
-				var user = userInfo?.Data?.FirstOrDefault();
-				if (!user.HasValue || string.IsNullOrWhiteSpace(user.Value.ProfileImageUrl))
-				{
-					return null;
-				}
+						if ((userInfo?.Data?.Count ?? 0) == 0 && !string.IsNullOrWhiteSpace(loginName))
+						{
+							userInfo = await _twitchHelixApiService.FetchUserInfo(loginNames: new[] { loginName! }).ConfigureAwait(false);
+						}
 
-				var userValue = user.Value;
-				var profileImageUrl = userValue.ProfileImageUrl;
-				if (!string.IsNullOrWhiteSpace(userValue.UserId))
-				{
-					_profileImageUrlCache[$"id:{userValue.UserId}"] = profileImageUrl;
-				}
+						var user = userInfo?.Data?.FirstOrDefault();
+						if (!user.HasValue || string.IsNullOrWhiteSpace(user.Value.ProfileImageUrl))
+						{
+							return;
+						}
 
-				if (!string.IsNullOrWhiteSpace(userValue.LoginName))
-				{
-					_profileImageUrlCache[$"login:{userValue.LoginName}"] = profileImageUrl;
-				}
+						var userValue = user.Value;
+						var profileImageUrl = userValue.ProfileImageUrl;
+						if (!string.IsNullOrWhiteSpace(userValue.UserId))
+						{
+							_profileImageUrlCache[$"id:{userValue.UserId}"] = profileImageUrl;
+						}
 
-				return profileImageUrl;
+						if (!string.IsNullOrWhiteSpace(userValue.LoginName))
+						{
+							_profileImageUrlCache[$"login:{userValue.LoginName}"] = profileImageUrl;
+						}
+					}
+					catch (Exception ex)
+					{
+						_logger.Verbose(ex, "Failed to resolve profile image URL for login={LoginName}, userId={UserId}", loginName, userId);
+					}
+				});
 			}
-			catch (Exception ex)
-			{
-				_logger.Verbose(ex, "Failed to resolve profile image URL for login={LoginName}, userId={UserId}", loginName, userId);
-				return null;
-			}
+
+			// Cache miss: return null immediately; cache will be populated by the background task above.
+			return null;
 		}
 
 		private static string EscapeLegacyIrcSystemMessage(string value)

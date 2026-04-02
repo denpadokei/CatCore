@@ -2,7 +2,7 @@ using System.Text.Json.Serialization;
 
 namespace CatCore.Models.Twitch.EventSub
 {
-	internal record struct EventSubChatClearPayload
+	internal struct EventSubChatClearPayload
 	{
 		[JsonPropertyName("subscription")]
 		public EventSubSubscription Subscription { get; init; }
@@ -11,7 +11,7 @@ namespace CatCore.Models.Twitch.EventSub
 		public EventSubChatClearEvent Event { get; init; }
 	}
 
-	public record struct EventSubChatClearEvent
+	public struct EventSubChatClearEvent
 	{
 		[JsonPropertyName("broadcaster_user_id")]
 		public string BroadcasterUserId { get; init; }

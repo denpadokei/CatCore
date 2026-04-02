@@ -3,14 +3,14 @@ using JetBrains.Annotations;
 
 namespace CatCore.Models.Twitch.EventSub
 {
-	internal record struct EventSubSessionPayload
+	internal struct EventSubSessionPayload
 	{
 		[JsonPropertyName("session")]
 		public EventSubSessionInfo Session { get; init; }
 	}
 
 	[PublicAPI]
-	public record struct EventSubSessionInfo
+	public struct EventSubSessionInfo
 	{
 		[JsonPropertyName("id")]
 		public string Id { get; init; }

@@ -4,7 +4,7 @@ using JetBrains.Annotations;
 
 namespace CatCore.Models.Twitch.EventSub
 {
-	internal record struct EventSubChatMessagePayload
+	internal struct EventSubChatMessagePayload
 	{
 		[JsonPropertyName("subscription")]
 		public EventSubSubscription Subscription { get; init; }
@@ -14,7 +14,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubSubscription
+	public struct EventSubSubscription
 	{
 		[JsonPropertyName("id")]
 		public string Id { get; init; }
@@ -42,7 +42,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubChatMessageEvent
+	public struct EventSubChatMessageEvent
 	{
 		[JsonPropertyName("broadcaster_user_id")]
 		public string BroadcasterUserId { get; init; }
@@ -88,7 +88,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubChatMessageContent
+	public struct EventSubChatMessageContent
 	{
 		[JsonPropertyName("text")]
 		public string Text { get; init; }
@@ -98,7 +98,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubFragment
+	public struct EventSubFragment
 	{
 		[JsonPropertyName("type")]
 		public string Type { get; init; }
@@ -117,7 +117,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubEmoteFragment
+	public struct EventSubEmoteFragment
 	{
 		[JsonPropertyName("id")]
 		public string Id { get; init; }
@@ -133,7 +133,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubCheermoteFragment
+	public struct EventSubCheermoteFragment
 	{
 		[JsonPropertyName("bits")]
 		public int Bits { get; init; }
@@ -143,7 +143,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubMentionFragment
+	public struct EventSubMentionFragment
 	{
 		[JsonPropertyName("user_id")]
 		public string UserId { get; init; }
@@ -156,7 +156,7 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubBadge
+	public struct EventSubBadge
 	{
 		[JsonPropertyName("set_id")]
 		public string SetId { get; init; }
@@ -169,14 +169,14 @@ namespace CatCore.Models.Twitch.EventSub
 	}
 
 	[PublicAPI]
-	public record struct EventSubCheer
+	public struct EventSubCheer
 	{
 		[JsonPropertyName("bits")]
 		public int Bits { get; init; }
 	}
 
 	[PublicAPI]
-	public record struct EventSubReply
+	public struct EventSubReply
 	{
 		[JsonPropertyName("parent_message_id")]
 		public string ParentMessageId { get; init; }

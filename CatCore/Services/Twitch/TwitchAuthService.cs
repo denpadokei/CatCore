@@ -23,6 +23,9 @@ namespace CatCore.Services.Twitch
 	{
 		private const string SERVICE_TYPE = nameof(Twitch);
 		private const string TWITCH_AUTH_BASEURL = "https://id.twitch.tv/oauth2/";
+		private static readonly TimeSpan VALIDATION_INTERVAL = TimeSpan.FromHours(1);
+		private static readonly TimeSpan FORCED_REFRESH_OFFSET = TimeSpan.FromMinutes(4);
+		private static readonly TimeSpan FAILED_REFRESH_RETRY_DELAY = TimeSpan.FromMinutes(1);
 
 		private readonly AsyncRetryPolicy<HttpResponseMessage> _exceptionRetryPolicy;
 
@@ -66,9 +69,16 @@ namespace CatCore.Services.Twitch
 		private readonly ConstantsBase _constants;
 		private readonly HttpClient _twitchAuthClient;
 		private readonly HttpClient _catCoreAuthClient;
+		private readonly object _validationLoopStateLock = new();
+		private readonly object _forcedRefreshStateLock = new();
 
 		private ValidationResponse? _loggedInUser;
 		private AuthenticationStatus _status;
+		private CancellationTokenSource? _validationCancellationTokenSource;
+		private Task? _validationTask;
+		private CancellationTokenSource? _forcedRefreshCancellationTokenSource;
+		private Task? _forcedRefreshTask;
+		private bool _isInitialized;
 
 		protected override string ServiceType => SERVICE_TYPE;
 
@@ -125,13 +135,157 @@ namespace CatCore.Services.Twitch
 
 			_exceptionRetryPolicy = Policy<HttpResponseMessage>
 				.Handle<HttpRequestException>()
-				.WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromMilliseconds(2 ^ (retryAttempt - 1) * 500));
+				.WaitAndRetryAsync(3, retryAttempt => TimeSpan.FromMilliseconds((1 << (retryAttempt - 1)) * 500));
+		}
+
+		/// <summary>
+		/// Initializes the Twitch authentication service and starts the background validation loop.
+		/// </summary>
+		/// <remarks>
+		/// This method is idempotent and can be safely called multiple times. On the first call it
+		/// creates the internal cancellation token source and starts the validation loop that keeps
+		/// authentication state up to date. Subsequent calls are ignored once initialization has
+		/// completed. Call this during application startup or when the <c>ITwitchAuthService</c>
+		/// instance is first created to ensure that token validation runs in the background.
+		/// </remarks>
+		public void Initialize()
+		{
+			lock (_validationLoopStateLock)
+			{
+				if (_isInitialized)
+				{
+					return;
+				}
+
+				_isInitialized = true;
+				_validationCancellationTokenSource = new CancellationTokenSource();
+				var validationTask = Task.Run(() => RunValidationLoop(_validationCancellationTokenSource.Token));
+				_validationTask = validationTask.ContinueWith(t =>
+				{
+					// Ensure any unhandled exceptions from the validation loop are observed and logged
+					if (t.IsFaulted && t.Exception != null)
+					{
+						_logger.Error(t.Exception, "Scheduled Twitch token validation loop encountered an unhandled exception");
+					}
+				}, TaskContinuationOptions.OnlyOnFaulted);
+			}
 		}
 
 		[MethodImpl(MethodImplOptions.AggressiveInlining)]
 		public ValidationResponse? FetchLoggedInUserInfo()
 		{
 			return _loggedInUser;
+		}
+
+		private async Task RunValidationLoop(CancellationToken cancellationToken)
+		{
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				try
+				{
+					await ValidateCurrentSession().ConfigureAwait(false);
+					await Task.Delay(VALIDATION_INTERVAL, cancellationToken).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException)
+				{
+					break;
+				}
+				catch (Exception ex)
+				{
+					_logger.Warning(ex, "Scheduled Twitch token validation loop failed");
+					await Task.Delay(5000, cancellationToken).ConfigureAwait(false);
+				}
+			}
+		}
+
+		private async Task ValidateCurrentSession()
+		{
+			if (!HasTokens)
+			{
+				CancelForcedRefresh();
+				return;
+			}
+
+			try
+			{
+				_logger.Information("Running scheduled Twitch token validation");
+				await FetchLoggedInUserInfoWithRefresh().ConfigureAwait(false);
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Scheduled Twitch token validation failed");
+				ScheduleForcedRefresh(FAILED_REFRESH_RETRY_DELAY);
+			}
+		}
+
+		private void ScheduleForcedRefresh(TimeSpan? delayOverride = null)
+		{
+			if (string.IsNullOrWhiteSpace(Credentials.RefreshToken) || Credentials.ValidUntil == null)
+			{
+				CancelForcedRefresh();
+				return;
+			}
+
+			var delay = delayOverride ?? (Credentials.ValidUntil.Value - DateTimeOffset.Now - FORCED_REFRESH_OFFSET);
+			if (delay < TimeSpan.Zero)
+			{
+				delay = TimeSpan.Zero;
+			}
+
+			CancellationTokenSource? previousCancellationTokenSource;
+			CancellationTokenSource cancellationTokenSource;
+			lock (_forcedRefreshStateLock)
+			{
+				previousCancellationTokenSource = _forcedRefreshCancellationTokenSource;
+				cancellationTokenSource = new CancellationTokenSource();
+				_forcedRefreshCancellationTokenSource = cancellationTokenSource;
+				_forcedRefreshTask = Task.Run(() => RunForcedRefreshSchedule(delay, cancellationTokenSource.Token));
+			}
+
+			previousCancellationTokenSource?.Cancel();
+			previousCancellationTokenSource?.Dispose();
+
+			_logger.Information("Scheduled forced Twitch token refresh in {Delay}", delay.ToString("g"));
+		}
+
+		private void CancelForcedRefresh()
+		{
+			CancellationTokenSource? cancellationTokenSource;
+			lock (_forcedRefreshStateLock)
+			{
+				cancellationTokenSource = _forcedRefreshCancellationTokenSource;
+				_forcedRefreshCancellationTokenSource = null;
+				_forcedRefreshTask = null;
+			}
+
+			if (cancellationTokenSource == null)
+			{
+				return;
+			}
+
+			cancellationTokenSource.Cancel();
+			cancellationTokenSource.Dispose();
+		}
+
+		private async Task RunForcedRefreshSchedule(TimeSpan delay, CancellationToken cancellationToken)
+		{
+			try
+			{
+				if (delay > TimeSpan.Zero)
+				{
+					await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+				}
+
+				_logger.Information("Running scheduled Twitch token refresh");
+				if (!await RefreshTokens().ConfigureAwait(false) && !cancellationToken.IsCancellationRequested)
+				{
+					ScheduleForcedRefresh(FAILED_REFRESH_RETRY_DELAY);
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				// Expected when rescheduling or clearing the current forced refresh task
+			}
 		}
 
 		// ReSharper disable once CognitiveComplexity
@@ -209,8 +363,14 @@ namespace CatCore.Services.Twitch
 					_logger.Warning($"Exchanging authorization code for credentials resulted in non-success status code: {responseMessage.StatusCode}");
 					return;
 				}
-				var contentString = responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+#if DEBUG
+				var contentString = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
+				_logger.Debug("Twitch authorization response payload: {Payload}", contentString);
+				var authorizationResponse = JsonSerializer.Deserialize(contentString, TwitchAuthSerializerContext.Default.AuthorizationResponse);
+#else
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
+#endif
 
 				var newCredentials = new TwitchCredentials(authorizationResponse);
 				await ValidateAccessToken(newCredentials).ConfigureAwait(false);
@@ -247,6 +407,7 @@ namespace CatCore.Services.Twitch
 				{
 					UpdateCredentials(TwitchCredentials.Empty());
 					_loggedInUser = null;
+					CancelForcedRefresh();
 				}
 
 				Status = AuthenticationStatus.Unauthorized;
@@ -261,6 +422,7 @@ namespace CatCore.Services.Twitch
 				{
 					UpdateCredentials(TwitchCredentials.Empty());
 					_loggedInUser = null;
+					CancelForcedRefresh();
 				}
 
 				Status = AuthenticationStatus.Unauthorized;
@@ -275,6 +437,7 @@ namespace CatCore.Services.Twitch
 				{
 					UpdateCredentials(TwitchCredentials.Empty());
 					_loggedInUser = null;
+					CancelForcedRefresh();
 				}
 
 				Status = AuthenticationStatus.Unauthorized;
@@ -289,6 +452,7 @@ namespace CatCore.Services.Twitch
 			UpdateCredentials(credentials.ValidUntil!.Value > validationResponse.ExpiresIn
 				? new TwitchCredentials(credentials.AccessToken, credentials.RefreshToken, validationResponse.ExpiresIn)
 				: credentials);
+			ScheduleForcedRefresh();
 
 			Status = AuthenticationStatus.Authenticated;
 
@@ -311,8 +475,9 @@ namespace CatCore.Services.Twitch
 			_logger.Information("Refreshing tokens using secure CatCore auth back-end");
 			try
 			{
+				var encodedRefreshToken = Uri.EscapeDataString(Credentials.RefreshToken);
 				using var responseMessage = await _exceptionRetryPolicy.ExecuteAsync(() => _catCoreAuthClient
-						.PostAsync($"{_constants.CatCoreAuthServerUri}api/twitch/refresh?refresh_token={Credentials.RefreshToken}", null))
+						.PostAsync($"{_constants.CatCoreAuthServerUri}api/twitch/refresh?refresh_token={encodedRefreshToken}", null))
 					.ConfigureAwait(false);
 
 				if (!responseMessage.IsSuccessStatusCode)
@@ -326,12 +491,23 @@ namespace CatCore.Services.Twitch
 				var refreshedCredentials = new TwitchCredentials(authorizationResponse);
 				return await ValidateAccessToken(refreshedCredentials).ConfigureAwait(false) != null;
 			}
+			catch (HttpRequestException ex)
+			{
+				_logger.Warning(ex, "An error occurred while trying to refresh tokens");
+				return false;
+			}
+			catch (TaskCanceledException ex)
+			{
+				_logger.Warning(ex, "Refreshing tokens timed out or was canceled");
+				return false;
+			}
 			catch (JsonException ex)
 			{
 				_logger.Warning(ex, "Something went wrong while trying to deserialize the refresh tokens body");
 
 				UpdateCredentials(TwitchCredentials.Empty());
 				_loggedInUser = null;
+				CancelForcedRefresh();
 
 				return false;
 			}
@@ -352,6 +528,7 @@ namespace CatCore.Services.Twitch
 
 				UpdateCredentials(TwitchCredentials.Empty());
 				_loggedInUser = null;
+				CancelForcedRefresh();
 
 				return responseMessage.IsSuccessStatusCode;
 			}
