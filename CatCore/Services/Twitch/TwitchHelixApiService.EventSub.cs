@@ -45,9 +45,12 @@ namespace CatCore.Services.Twitch
 			try
 			{
 				var jsonContent = JsonSerializer.Serialize(requestDto, TwitchHelixSerializerContext.Default.SendChatMessageRequestDto);
-				using var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
 				using var response = await _combinedHelixPolicy.ExecuteAsync(async ct =>
-					await _helixClient.PostAsync(url, content, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+				{
+					var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
+					using var httpRequestMessage = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+					return await _helixClient.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
+				}, cancellationToken).ConfigureAwait(false);
 
 				return response?.IsSuccessStatusCode ?? false;
 			}
