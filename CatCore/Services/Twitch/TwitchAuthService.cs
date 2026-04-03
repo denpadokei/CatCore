@@ -58,13 +58,6 @@ namespace CatCore.Services.Twitch
 			"user:read:follows"
 		};
 
-		private static readonly string[] _requiredEventSubChatScopes =
-		{
-			"user:read:chat",
-			"user:bot",
-			"channel:bot"
-		};
-
 		private readonly ILogger _logger;
 		private readonly ConstantsBase _constants;
 		private readonly HttpClient _twitchAuthClient;
@@ -430,7 +423,7 @@ namespace CatCore.Services.Twitch
 				return null;
 			}
 
-			var missingScopes = _requiredEventSubChatScopes.Where(requiredScope => !validationResponse.Scopes.Contains(requiredScope)).ToArray();
+			var missingScopes = _twitchAuthorizationScope.Where(requiredScope => !validationResponse.Scopes.Contains(requiredScope)).ToArray();
 			if (missingScopes.Length > 0)
 			{
 				if (resetDataOnFailure)
@@ -441,7 +434,7 @@ namespace CatCore.Services.Twitch
 				}
 
 				Status = AuthenticationStatus.Unauthorized;
-				_logger.Warning("Twitch token is missing required EventSub chat scopes. Missing={MissingScopes}; Current={CurrentScopes}",
+				_logger.Warning("Twitch token is missing required authorization scopes. Missing={MissingScopes}; Current={CurrentScopes}",
 					string.Join(",", missingScopes),
 					string.Join(",", validationResponse.Scopes));
 				return null;
