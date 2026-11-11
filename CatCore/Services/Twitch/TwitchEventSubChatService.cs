@@ -95,10 +95,7 @@ namespace CatCore.Services.Twitch
 		private CancellationTokenSource? _sendQueueCancellationTokenSource;
 		private Task? _sendQueueTask;
 
-		private readonly object _reconnectStateLock = new();
-		private IKittenWebSocketProvider? _pendingReconnectWebSocketProvider;
-		private bool _pendingReconnectIsCommitted;
-		private bool _reconnectInProgress;
+		private readonly EventSubReconnectAttemptTracker<IKittenWebSocketProvider> _reconnectAttemptTracker = new();
 
 		private readonly object _keepAliveWatchdogStateLock = new();
 		private CancellationTokenSource? _keepAliveWatchdogCancellationTokenSource;
@@ -346,7 +343,7 @@ namespace CatCore.Services.Twitch
 		{
 			using var _ = await Synchronization.LockAsync(_connectionLockerSemaphoreSlim);
 
-			await AbortPendingReconnectAsync().ConfigureAwait(false);
+			await AbortReconnectAttemptForStopAsync().ConfigureAwait(false);
 			await StopViewCountPollingIfRunning().ConfigureAwait(false);
 			await StopSendQueueWorker().ConfigureAwait(false);
 			await StopKeepAliveWatchdog().ConfigureAwait(false);
@@ -617,8 +614,7 @@ namespace CatCore.Services.Twitch
 
 				_reconnectUrl = reconnectUrl;
 				var reconnectUrlForTask = reconnectUrl;
-				_ = Task.Run(() => ReconnectWithNewProviderAsync(reconnectUrlForTask));
-				_ = Task.Run(() => ScheduleReconnectFallbackAsync());
+				_ = Task.Run(() => RunReconnectAttemptAsync(reconnectUrlForTask));
 			}
 			catch (Exception ex)
 			{
@@ -626,18 +622,21 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		private async Task ReconnectWithNewProviderAsync(string reconnectUrl)
+		/// <summary>
+		/// Runs a single reconnect attempt: opens a replacement connection and waits for its Welcome
+		/// message. The attempt is owned by <see cref="EventSubReconnectAttemptTracker{TProvider}"/>, so the
+		/// fallback timer and the Welcome handler cannot both act on it (and a stale fallback can never
+		/// abort a connection that was already committed).
+		/// </summary>
+		private async Task RunReconnectAttemptAsync(string reconnectUrl)
 		{
-			lock (_reconnectStateLock)
+			if (!_reconnectAttemptTracker.TryBegin(out var attempt))
 			{
-				if (_reconnectInProgress)
-				{
-					return;
-				}
-
-				_reconnectInProgress = true;
-				_pendingReconnectIsCommitted = false;
+				_logger.Verbose("An EventSub reconnect attempt is already in progress; ignoring the additional session_reconnect message");
+				return;
 			}
+
+			_ = ScheduleReconnectFallbackAsync(attempt);
 
 			try
 			{
@@ -646,19 +645,36 @@ namespace CatCore.Services.Twitch
 				// The connect URL is the single-use reconnect URL, so the replacement session inherits
 				// the subscriptions of the old connection.
 				_connectedViaReconnectUrl = true;
-				lock (_reconnectStateLock)
+
+				if (!_reconnectAttemptTracker.TryAttach(candidate, attempt.Generation))
 				{
-					_pendingReconnectWebSocketProvider = candidate;
+					await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+					return;
 				}
 
 				_logger.Verbose("Connecting to the replacement EventSub endpoint");
 				await candidate.Connect(reconnectUrl).ConfigureAwait(false);
+
+				// The attempt may have been aborted (fallback timer / transport stop) while the
+				// connection was being established; do not leave an untracked connection behind.
+				if (!_reconnectAttemptTracker.IsPending(attempt.Generation))
+				{
+					await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+				}
 			}
 			catch (Exception ex)
 			{
 				_logger.Warning(ex, "Failed to establish a replacement EventSub connection; falling back to the base endpoint");
-				await AbortPendingReconnectAsync().ConfigureAwait(false);
-				await StartInternal(isReconnect: true).ConfigureAwait(false);
+				if (_reconnectAttemptTracker.TryAbort(attempt.Generation, out var abortedCandidate))
+				{
+					if (abortedCandidate != null)
+					{
+						await CloseReconnectCandidateAsync(abortedCandidate).ConfigureAwait(false);
+					}
+
+					_reconnectUrl = null;
+					await StartInternal(isReconnect: true).ConfigureAwait(false);
+				}
 			}
 		}
 
@@ -680,9 +696,7 @@ namespace CatCore.Services.Twitch
 				}
 				catch (Exception ex)
 				{
-					_logger.Warning(ex, "Failed to commit the replacement EventSub connection; falling back to the base endpoint");
-					await AbortPendingReconnectAsync().ConfigureAwait(false);
-					await StartInternal(isReconnect: true).ConfigureAwait(false);
+					_logger.Error(ex, "Failed to commit the replacement EventSub connection");
 				}
 			});
 			return Task.CompletedTask;
@@ -690,22 +704,12 @@ namespace CatCore.Services.Twitch
 
 		private async Task<bool> CommitPendingReconnectAsync()
 		{
-			IKittenWebSocketProvider? candidate;
-			IKittenWebSocketProvider? previousProvider;
-			lock (_reconnectStateLock)
+			if (!_reconnectAttemptTracker.TryCommit(out var candidate) || candidate == null)
 			{
-				candidate = _pendingReconnectWebSocketProvider;
-				if (candidate == null || _pendingReconnectIsCommitted)
-				{
-					return false;
-				}
-
-				_pendingReconnectIsCommitted = true;
-				_pendingReconnectWebSocketProvider = null;
-				previousProvider = _kittenWebSocketProvider;
-				_reconnectInProgress = false;
+				return false;
 			}
 
+			var previousProvider = _kittenWebSocketProvider;
 			candidate.MessageReceived -= PendingReconnectMessageReceivedHandler;
 			candidate.ConnectHappened += ConnectHappenedHandler;
 			candidate.DisconnectHappened += DisconnectHappenedHandler;
@@ -733,22 +737,8 @@ namespace CatCore.Services.Twitch
 			return true;
 		}
 
-		private async Task AbortPendingReconnectAsync()
+		private async Task CloseReconnectCandidateAsync(IKittenWebSocketProvider candidate)
 		{
-			IKittenWebSocketProvider? candidate;
-			lock (_reconnectStateLock)
-			{
-				candidate = _pendingReconnectWebSocketProvider;
-				_pendingReconnectWebSocketProvider = null;
-				_pendingReconnectIsCommitted = false;
-				_reconnectInProgress = false;
-			}
-
-			if (candidate == null)
-			{
-				return;
-			}
-
 			candidate.MessageReceived -= PendingReconnectMessageReceivedHandler;
 			try
 			{
@@ -756,27 +746,44 @@ namespace CatCore.Services.Twitch
 			}
 			catch (Exception ex)
 			{
-				_logger.Verbose(ex, "Failed to close the aborted EventSub reconnect connection");
+				_logger.Verbose(ex, "Failed to close an aborted EventSub reconnect connection");
 			}
 		}
 
-		private async Task ScheduleReconnectFallbackAsync()
+		private async Task AbortReconnectAttemptForStopAsync()
 		{
-			await Task.Delay(TimeSpan.FromSeconds(20)).ConfigureAwait(false);
-
-			bool stillPending;
-			lock (_reconnectStateLock)
+			if (_reconnectAttemptTracker.TryAbortAny(out var candidate) && candidate != null)
 			{
-				stillPending = _pendingReconnectWebSocketProvider != null && !_pendingReconnectIsCommitted;
+				await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+			}
+		}
+
+		private async Task ScheduleReconnectFallbackAsync(ReconnectAttempt attempt)
+		{
+			try
+			{
+				await Task.Delay(TimeSpan.FromSeconds(20), attempt.CancellationToken).ConfigureAwait(false);
+			}
+			catch (OperationCanceledException)
+			{
+				// The attempt was committed or aborted; the fallback must not act on it.
+				return;
 			}
 
-			if (!stillPending)
+			// Atomically claim the abort. If the Welcome handler committed the connection first, this
+			// returns false, so the fallback can no longer close a connection that is already active.
+			if (!_reconnectAttemptTracker.TryAbort(attempt.Generation, out var candidate))
 			{
 				return;
 			}
 
 			_logger.Warning("Replacement EventSub connection did not receive a Welcome message within 20 seconds; falling back to the base endpoint");
-			await AbortPendingReconnectAsync().ConfigureAwait(false);
+			if (candidate != null)
+			{
+				await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+			}
+
+			_reconnectUrl = null;
 			await StartInternal(isReconnect: true).ConfigureAwait(false);
 		}
 
