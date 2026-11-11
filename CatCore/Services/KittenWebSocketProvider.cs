@@ -65,19 +65,22 @@ namespace CatCore.Services
 				.ObserveOn(System.Reactive.Concurrency.ThreadPoolScheduler.Instance)
 				.Catch<(IDataframe? dataframe, ConnectionStatus state), WebsocketClientLiteTcpConnectException>(ex =>
 				{
-					_logger.Error(ex, "A tcp connect exception occurred. Marking connection as failed");
+					// Do not log the exception object: WebsocketClientLite may embed the full URI (including
+					// path/query authorization material) in the message or stack trace.
+					_logger.Error("A tcp connect exception occurred ({ExceptionType}) for endpoint host {Host}. Marking connection as failed", ex.GetType().Name, LogRedaction.GetUriHost(url));
 					return Observable.Return<(IDataframe? dataframe, ConnectionStatus state)>((null, ConnectionStatus.ConnectionFailed));
 				})
 				.Catch<(IDataframe? dataframe, ConnectionStatus state), WebsocketClientLiteException>(ex =>
 				{
-					_logger.Error(ex, "A websocket error occurred. Marking connection as failed");
+					// See above: the exception message may contain the session/reconnect URL.
+					_logger.Error("A websocket error occurred ({ExceptionType}) for endpoint host {Host}. Marking connection as failed", ex.GetType().Name, LogRedaction.GetUriHost(url));
 					return Observable.Return<(IDataframe? dataframe, ConnectionStatus state)>((null, ConnectionStatus.ConnectionFailed));
 				});
 			_websocketConnectionSubject = new Subject<(IDataframe? dataframe, ConnectionStatus state)>();
 
 			_connectObservable = _websocketConnectionSubject
 				.Where(tuple => tuple.state == ConnectionStatus.WebsocketConnected)
-				.Do(_ => _logger.Debug("Connected to url: {Url}", url))
+				.Do(_ => _logger.Debug("Connected to endpoint host: {Host}", LogRedaction.GetUriHost(url)))
 				.Select(_ => Observable.FromAsync(async () => await ConnectHandler(wrapper)))
 				.Concat()
 				.Subscribe();
@@ -96,7 +99,7 @@ namespace CatCore.Services
 					or ConnectionStatus.Aborted
 					or ConnectionStatus.ConnectionFailed
 					or ConnectionStatus.Close)
-				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for url: {Url}", tuple.state, url))
+				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for endpoint host: {Host}", tuple.state, LogRedaction.GetUriHost(url)))
 				.Select(_ => Observable.FromAsync(() => Connect(Volatile.Read(ref _autoReconnectUrl) ?? url)))
 				.Concat()
 				.Subscribe();

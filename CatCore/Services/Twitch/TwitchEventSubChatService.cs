@@ -473,9 +473,7 @@ namespace CatCore.Services.Twitch
 		private void MessageReceivedHandlerInternal(WebSocketConnection webSocketConnection, string rawMessage)
 		{
 			Interlocked.Exchange(ref _lastEventSubMessageTicks, DateTimeOffset.UtcNow.Ticks);
-#if DEBUG
-			_logger.Verbose("EventSub message received: {Message}", rawMessage);
-#endif
+			// Do not log raw EventSub frames: they contain chat content, user identifiers and session data.
 
 			try
 			{
@@ -617,7 +615,7 @@ namespace CatCore.Services.Twitch
 
 				var reconnectUrl = payload.Session.ReconnectUrl;
 				// Do not log the reconnect URL itself: it is a per-session, credential-like value.
-				_logger.Information("EventSub session reconnect requested. New host: {ReconnectHost}", GetSafeUriHost(reconnectUrl));
+				_logger.Information("EventSub session reconnect requested. New host: {ReconnectHost}", LogRedaction.GetUriHost(reconnectUrl));
 
 				if (reconnectUrl is not { Length: > 0 })
 				{
@@ -2579,9 +2577,5 @@ namespace CatCore.Services.Twitch
 			});
 		}
 
-		private static string GetSafeUriHost(string? url)
-		{
-			return Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : "<invalid>";
-		}
 	}
 }
