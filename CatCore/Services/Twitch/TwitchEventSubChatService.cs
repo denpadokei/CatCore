@@ -1999,14 +1999,154 @@ namespace CatCore.Services.Twitch
 			{
 				using var jsonDocument = JsonDocument.Parse(rawMessage);
 				var subscription = jsonDocument.RootElement.GetProperty("payload").GetProperty("subscription");
-				_logger.Warning("EventSub subscription revoked. Type={SubscriptionType}, Status={SubscriptionStatus}",
-					TryGetString(subscription, "type", out var subscriptionType) ? subscriptionType : "<unknown>",
-					TryGetString(subscription, "status", out var subscriptionStatus) ? subscriptionStatus : "<unknown>");
+				var subscriptionId = TryGetString(subscription, "id", out var subscriptionIdValue) ? subscriptionIdValue : string.Empty;
+				var subscriptionType = TryGetString(subscription, "type", out var subscriptionTypeValue) ? subscriptionTypeValue : string.Empty;
+				var status = TryGetString(subscription, "status", out var statusValue) ? statusValue : string.Empty;
+				var broadcasterUserId = subscription.TryGetProperty("condition", out var condition)
+					&& TryGetString(condition, "broadcaster_user_id", out var broadcasterUserIdValue)
+						? broadcasterUserIdValue
+						: null;
+
+				_logger.Warning("EventSub subscription revoked. Type={SubscriptionType}, Status={SubscriptionStatus}, SubscriptionId={SubscriptionId}",
+					subscriptionType, status, subscriptionId);
+
+				_ = Task.Run(() => HandleRevocationAsync(subscriptionId, subscriptionType, status, broadcasterUserId));
 			}
 			catch (Exception ex)
 			{
 				_logger.Warning(ex, "Received a revocation message that could not be parsed");
 			}
+		}
+
+		private async Task HandleRevocationAsync(string subscriptionId, string subscriptionType, string status, string? broadcasterUserId)
+		{
+			try
+			{
+				await RemoveTrackedSubscriptionAsync(broadcasterUserId, subscriptionId).ConfigureAwait(false);
+
+				var action = ClassifyRevocation(status);
+				_logger.Warning("Handling revoked EventSub subscription. Type={SubscriptionType}, Status={SubscriptionStatus}, Action={RevocationAction}",
+					subscriptionType, status, action);
+
+				switch (action)
+				{
+					case EventSubRevocationAction.ForceReauth:
+						if (!await _twitchAuthService.RefreshTokens(force: true).ConfigureAwait(false))
+						{
+							_logger.Error("Token refresh after an EventSub authorization revocation failed; user re-authorization is required");
+						}
+						break;
+					case EventSubRevocationAction.DetachChannel:
+						if (broadcasterUserId is { Length: > 0 } detachedChannelId)
+						{
+							await DetachChannelAsync(detachedChannelId).ConfigureAwait(false);
+						}
+						break;
+					case EventSubRevocationAction.ResubscribeChannel:
+						if (broadcasterUserId is { Length: > 0 } resubscribeChannelId)
+						{
+							var channelName = ResolveChannelName(resubscribeChannelId);
+							if (channelName != null)
+							{
+								await SubscribeToChannelInternal(resubscribeChannelId, channelName, forceResubscribe: true).ConfigureAwait(false);
+							}
+							else
+							{
+								_logger.Warning("Cannot resubscribe revoked EventSub subscriptions for channel {ChannelId}: it is not an active channel", resubscribeChannelId);
+							}
+						}
+						break;
+					case EventSubRevocationAction.LogVersionRemoved:
+						_logger.Error("EventSub subscription type {SubscriptionType} was revoked because its version was removed; update CatCore to a version that supports the current Twitch API", subscriptionType);
+						break;
+				}
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle a revoked EventSub subscription");
+			}
+		}
+
+		internal static EventSubRevocationAction ClassifyRevocation(string? status)
+		{
+			return status switch
+			{
+				"authorization_revoked" => EventSubRevocationAction.ForceReauth,
+				"user_removed" => EventSubRevocationAction.DetachChannel,
+				"moderator_removed" => EventSubRevocationAction.DetachChannel,
+				"chat_user_banned" => EventSubRevocationAction.DetachChannel,
+				"version_removed" => EventSubRevocationAction.LogVersionRemoved,
+				_ => EventSubRevocationAction.ResubscribeChannel
+			};
+		}
+
+		private async Task RemoveTrackedSubscriptionAsync(string? channelId, string subscriptionId)
+		{
+			if (channelId is not { Length: > 0 } || string.IsNullOrEmpty(subscriptionId))
+			{
+				return;
+			}
+
+			await _subscriptionManagementSemaphoreSlim.WaitAsync().ConfigureAwait(false);
+			try
+			{
+				if (!_channelSubscriptionIds.TryGetValue(channelId, out var subscriptionIds))
+				{
+					return;
+				}
+
+				var remainingSubscriptionIds = subscriptionIds.Where(id => !string.Equals(id, subscriptionId, StringComparison.Ordinal)).ToList();
+				if (remainingSubscriptionIds.Count == 0)
+				{
+					_channelSubscriptionIds.TryRemove(channelId, out _);
+				}
+				else
+				{
+					_channelSubscriptionIds[channelId] = remainingSubscriptionIds;
+				}
+			}
+			finally
+			{
+				_subscriptionManagementSemaphoreSlim.Release();
+			}
+		}
+
+		private async Task DetachChannelAsync(string channelId)
+		{
+			List<string>? remainingSubscriptionIds;
+			await _subscriptionManagementSemaphoreSlim.WaitAsync().ConfigureAwait(false);
+			try
+			{
+				_channelSubscriptionIds.TryRemove(channelId, out remainingSubscriptionIds);
+			}
+			finally
+			{
+				_subscriptionManagementSemaphoreSlim.Release();
+			}
+
+			if (remainingSubscriptionIds != null)
+			{
+				foreach (var subscriptionId in remainingSubscriptionIds)
+				{
+					await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
+				}
+			}
+
+			var channelName = ResolveChannelName(channelId);
+			if (channelName == null)
+			{
+				return;
+			}
+
+			_roomStateTrackerService.UpdateRoomState(channelName, null);
+			_userStateTrackerService.UpdateUserState(channelId, null);
+			InvokeSafely(OnLeaveChannel, new TwitchChannel(this, channelId, channelName), nameof(OnLeaveChannel));
+		}
+
+		private string? ResolveChannelName(string channelId)
+		{
+			var channelDictionary = _twitchChannelManagementService.GetAllActiveChannelsAsDictionary(includeSelfRegardlessOfState: true);
+			return channelDictionary.TryGetValue(channelId, out var channelName) ? channelName : null;
 		}
 
 		private async Task SubscribeToAllChannelsInternal()
@@ -2030,12 +2170,12 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		private async Task SubscribeToChannelInternal(string channelId, string channelName)
+		private async Task SubscribeToChannelInternal(string channelId, string channelName, bool forceResubscribe = false)
 		{
 			await _subscriptionManagementSemaphoreSlim.WaitAsync().ConfigureAwait(false);
 			try
 			{
-				await SubscribeToChannelCoreInternal(channelId, channelName).ConfigureAwait(false);
+				await SubscribeToChannelCoreInternal(channelId, channelName, forceResubscribe).ConfigureAwait(false);
 			}
 			finally
 			{
@@ -2043,7 +2183,7 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		private async Task SubscribeToChannelCoreInternal(string channelId, string channelName)
+		private async Task SubscribeToChannelCoreInternal(string channelId, string channelName, bool forceResubscribe = false)
 		{
 			if (_sessionId == null)
 			{
@@ -2058,7 +2198,7 @@ namespace CatCore.Services.Twitch
 			}
 
 			var hasFailedSubscriptionTypes = _channelFailedSubscriptionTypes.TryGetValue(channelId, out var previouslyFailedTypes) && previouslyFailedTypes.Count > 0;
-			if (_subscriptionSessionId == _sessionId && _channelSubscriptionIds.ContainsKey(channelId) && !hasFailedSubscriptionTypes)
+			if (!forceResubscribe && _subscriptionSessionId == _sessionId && _channelSubscriptionIds.ContainsKey(channelId) && !hasFailedSubscriptionTypes)
 			{
 				_logger.Verbose("Channel {ChannelId} is already subscribed for the current EventSub session", channelId);
 				return;
