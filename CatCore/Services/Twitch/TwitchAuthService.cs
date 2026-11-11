@@ -331,7 +331,7 @@ namespace CatCore.Services.Twitch
 					if (validateAccessToken == null || !TokenIsValid)
 					{
 						_logger.Information("Refreshing tokens");
-						await RefreshTokens().ConfigureAwait(false);
+						await RefreshTokens(force: true).ConfigureAwait(false);
 					}
 
 					return _loggedInUser;
@@ -391,6 +391,14 @@ namespace CatCore.Services.Twitch
 		}
 
 		public async Task<ValidationResponse?> ValidateAccessToken(TwitchCredentials credentials, bool resetDataOnFailure = true)
+		{
+			// Serialize the validation result with token rotation so a validation that started before a
+			// refresh cannot overwrite the freshly rotated credentials.
+			using var _ = await Synchronization.LockAsync(_refreshLocker).ConfigureAwait(false);
+			return await ValidateAccessTokenCore(credentials, resetDataOnFailure).ConfigureAwait(false);
+		}
+
+		private async Task<ValidationResponse?> ValidateAccessTokenCore(TwitchCredentials credentials, bool resetDataOnFailure = true)
 		{
 			if (string.IsNullOrWhiteSpace(credentials.AccessToken))
 			{
@@ -453,6 +461,13 @@ namespace CatCore.Services.Twitch
 			}
 
 			_scopeMismatchDetected = false;
+
+			if (!string.Equals(Credentials.AccessToken, credentials.AccessToken, StringComparison.Ordinal))
+			{
+				_logger.Verbose("Ignoring a stale token validation result because the current credentials changed while validating");
+				return _loggedInUser;
+			}
+
 			_loggedInUser = validationResponse;
 
 			UpdateCredentials(credentials.ValidUntil!.Value > validationResponse.ExpiresIn
@@ -498,7 +513,7 @@ namespace CatCore.Services.Twitch
 				// Persist the rotated token pair immediately. Twitch may invalidate the previous refresh token
 				// as soon as it issues a new one, so losing the new pair would permanently log the user out.
 				UpdateCredentials(refreshedCredentials);
-				return await ValidateAccessToken(refreshedCredentials).ConfigureAwait(false) != null;
+				return await ValidateAccessTokenCore(refreshedCredentials).ConfigureAwait(false) != null;
 			}
 			catch (HttpRequestException ex)
 			{

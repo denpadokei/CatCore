@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -95,12 +96,15 @@ namespace CatCore.Services.Twitch
 		private CancellationTokenSource? _sendQueueCancellationTokenSource;
 		private Task? _sendQueueTask;
 
+		private readonly SemaphoreSlim _restartSemaphoreSlim = new(1, 1);
 		private readonly EventSubReconnectAttemptTracker<IKittenWebSocketProvider> _reconnectAttemptTracker = new();
+		private AsyncEventHandlerDefinitions.AsyncEventHandler<WebSocketConnection, string>? _pendingReconnectMessageReceivedHandler;
+		private readonly ConcurrentDictionary<string, HashSet<string>> _channelFailedSubscriptionTypes = new(StringComparer.Ordinal);
 
 		private readonly object _keepAliveWatchdogStateLock = new();
 		private CancellationTokenSource? _keepAliveWatchdogCancellationTokenSource;
 		private Task? _keepAliveWatchdogTask;
-		private DateTimeOffset _lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+		private long _lastEventSubMessageTicks = DateTimeOffset.UtcNow.Ticks;
 		private int _keepAliveTimeoutSeconds = 10;
 
 		public TwitchEventSubChatService(ILogger logger, IKittenWebSocketProvider kittenWebSocketProvider, IKittenPlatformActiveStateManager activeStateManager,
@@ -259,7 +263,7 @@ namespace CatCore.Services.Twitch
 						continue;
 					}
 
-					var success = await _twitchHelixApiService.SendChatMessage(queuedMessage.channelId, senderUserId, queuedMessage.message).ConfigureAwait(false);
+					var success = await _twitchHelixApiService.SendChatMessage(queuedMessage.channelId, senderUserId, queuedMessage.message, cancellationToken).ConfigureAwait(false);
 					if (!success)
 					{
 						_logger.Warning("Failed to send message to channel {ChannelId}", queuedMessage.channelId);
@@ -335,8 +339,18 @@ namespace CatCore.Services.Twitch
 
 		private async Task RestartInternal()
 		{
-			await StopInternal().ConfigureAwait(false);
-			await StartInternal().ConfigureAwait(false);
+			// Serialize restarts so overlapping credential-revocation/keepalive triggers cannot interleave
+			// a StopInternal and a StartInternal belonging to different restart cycles.
+			await _restartSemaphoreSlim.WaitAsync().ConfigureAwait(false);
+			try
+			{
+				await StopInternal().ConfigureAwait(false);
+				await StartInternal().ConfigureAwait(false);
+			}
+			finally
+			{
+				_restartSemaphoreSlim.Release();
+			}
 		}
 
 		private async Task StopInternal()
@@ -458,7 +472,7 @@ namespace CatCore.Services.Twitch
 
 		private void MessageReceivedHandlerInternal(WebSocketConnection webSocketConnection, string rawMessage)
 		{
-			_lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+			Interlocked.Exchange(ref _lastEventSubMessageTicks, DateTimeOffset.UtcNow.Ticks);
 #if DEBUG
 			_logger.Verbose("EventSub message received: {Message}", rawMessage);
 #endif
@@ -608,13 +622,12 @@ namespace CatCore.Services.Twitch
 				if (reconnectUrl is not { Length: > 0 })
 				{
 					_logger.Warning("EventSub session_reconnect did not include a reconnect URL; reconnecting to the base endpoint");
-					_ = Task.Run(() => RestartInternal());
+					RunDetached(RestartInternal, "restart after a reconnect message without URL");
 					return;
 				}
 
-				_reconnectUrl = reconnectUrl;
 				var reconnectUrlForTask = reconnectUrl;
-				_ = Task.Run(() => RunReconnectAttemptAsync(reconnectUrlForTask));
+				RunDetached(() => RunReconnectAttemptAsync(reconnectUrlForTask), "EventSub reconnect attempt");
 			}
 			catch (Exception ex)
 			{
@@ -636,21 +649,25 @@ namespace CatCore.Services.Twitch
 				return;
 			}
 
+			_reconnectUrl = reconnectUrl;
+			var messageHandler = CreatePendingReconnectMessageReceivedHandler(attempt.Generation);
+			_pendingReconnectMessageReceivedHandler = messageHandler;
 			_ = ScheduleReconnectFallbackAsync(attempt);
 
 			try
 			{
 				var candidate = new KittenWebSocketProvider(_logger);
-				candidate.MessageReceived += PendingReconnectMessageReceivedHandler;
-				// The connect URL is the single-use reconnect URL, so the replacement session inherits
-				// the subscriptions of the old connection.
-				_connectedViaReconnectUrl = true;
+				candidate.MessageReceived += messageHandler;
 
 				if (!_reconnectAttemptTracker.TryAttach(candidate, attempt.Generation))
 				{
 					await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
 					return;
 				}
+
+				// The connect URL is the single-use reconnect URL, so the replacement session inherits
+				// the subscriptions of the old connection. Set this only once the attempt is attached.
+				_connectedViaReconnectUrl = true;
 
 				_logger.Verbose("Connecting to the replacement EventSub endpoint");
 				await candidate.Connect(reconnectUrl).ConfigureAwait(false);
@@ -671,6 +688,11 @@ namespace CatCore.Services.Twitch
 					{
 						await CloseReconnectCandidateAsync(abortedCandidate).ConfigureAwait(false);
 					}
+					else
+					{
+						_pendingReconnectMessageReceivedHandler = null;
+						_connectedViaReconnectUrl = false;
+					}
 
 					_reconnectUrl = null;
 					await StartInternal(isReconnect: true).ConfigureAwait(false);
@@ -678,39 +700,54 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		private Task PendingReconnectMessageReceivedHandler(WebSocketConnection connection, string message)
+		private AsyncEventHandlerDefinitions.AsyncEventHandler<WebSocketConnection, string> CreatePendingReconnectMessageReceivedHandler(int generation)
+		{
+			return (connection, message) => PendingReconnectMessageReceivedHandler(generation, connection, message);
+		}
+
+		private Task PendingReconnectMessageReceivedHandler(int generation, WebSocketConnection connection, string message)
 		{
 			if (!TryGetEventSubMessageType(message, out var messageType) || messageType != "session_welcome")
 			{
 				return Task.CompletedTask;
 			}
 
-			_ = Task.Run(async () =>
+			RunDetached(async () =>
 			{
-				try
+				if (await CommitPendingReconnectAsync(generation).ConfigureAwait(false))
 				{
-					if (await CommitPendingReconnectAsync().ConfigureAwait(false))
-					{
-						MessageReceivedHandlerInternal(connection, message);
-					}
+					MessageReceivedHandlerInternal(connection, message);
 				}
-				catch (Exception ex)
-				{
-					_logger.Error(ex, "Failed to commit the replacement EventSub connection");
-				}
-			});
+			}, "commit of the replacement EventSub connection");
 			return Task.CompletedTask;
 		}
 
-		private async Task<bool> CommitPendingReconnectAsync()
+		private async Task<bool> CommitPendingReconnectAsync(int generation)
 		{
-			if (!_reconnectAttemptTracker.TryCommit(out var candidate) || candidate == null)
+			// Take the connection lock before claiming the attempt so the provider swap and the teardown
+			// of the previous provider cannot race StopInternal's snapshot/teardown of the same fields.
+			using var _ = await Synchronization.LockAsync(_connectionLockerSemaphoreSlim).ConfigureAwait(false);
+
+			if (!_reconnectAttemptTracker.TryCommit(generation, out var candidate) || candidate == null)
 			{
 				return false;
 			}
 
+			if (!_isStarted)
+			{
+				_logger.Verbose("Reconnect commit discarded because the transport was stopped while the replacement connection was being established");
+				await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+				return false;
+			}
+
+			var messageHandler = _pendingReconnectMessageReceivedHandler;
+			_pendingReconnectMessageReceivedHandler = null;
+			if (messageHandler != null)
+			{
+				candidate.MessageReceived -= messageHandler;
+			}
+
 			var previousProvider = _kittenWebSocketProvider;
-			candidate.MessageReceived -= PendingReconnectMessageReceivedHandler;
 			candidate.ConnectHappened += ConnectHappenedHandler;
 			candidate.DisconnectHappened += DisconnectHappenedHandler;
 			candidate.MessageReceived += MessageReceivedHandler;
@@ -739,7 +776,18 @@ namespace CatCore.Services.Twitch
 
 		private async Task CloseReconnectCandidateAsync(IKittenWebSocketProvider candidate)
 		{
-			candidate.MessageReceived -= PendingReconnectMessageReceivedHandler;
+			var messageHandler = _pendingReconnectMessageReceivedHandler;
+			if (messageHandler != null)
+			{
+				candidate.MessageReceived -= messageHandler;
+				if (ReferenceEquals(_pendingReconnectMessageReceivedHandler, messageHandler))
+				{
+					_pendingReconnectMessageReceivedHandler = null;
+				}
+			}
+
+			_connectedViaReconnectUrl = false;
+
 			try
 			{
 				await candidate.Disconnect("reconnect attempt aborted").ConfigureAwait(false);
@@ -755,6 +803,11 @@ namespace CatCore.Services.Twitch
 			if (_reconnectAttemptTracker.TryAbortAny(out var candidate) && candidate != null)
 			{
 				await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+			}
+			else
+			{
+				_pendingReconnectMessageReceivedHandler = null;
+				_connectedViaReconnectUrl = false;
 			}
 		}
 
@@ -781,6 +834,11 @@ namespace CatCore.Services.Twitch
 			if (candidate != null)
 			{
 				await CloseReconnectCandidateAsync(candidate).ConfigureAwait(false);
+			}
+			else
+			{
+				_pendingReconnectMessageReceivedHandler = null;
+				_connectedViaReconnectUrl = false;
 			}
 
 			_reconnectUrl = null;
@@ -811,7 +869,7 @@ namespace CatCore.Services.Twitch
 					return;
 				}
 
-				_lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+				Interlocked.Exchange(ref _lastEventSubMessageTicks, DateTimeOffset.UtcNow.Ticks);
 				_keepAliveWatchdogCancellationTokenSource = new CancellationTokenSource();
 				var cancellationToken = _keepAliveWatchdogCancellationTokenSource.Token;
 				_keepAliveWatchdogTask = Task.Run(() => RunKeepAliveWatchdog(cancellationToken));
@@ -836,18 +894,21 @@ namespace CatCore.Services.Twitch
 			}
 
 			cancellationTokenSource.Cancel();
-			try
+			if (watchdogTask != null && Task.CurrentId != watchdogTask.Id)
 			{
-				if (watchdogTask != null)
+				try
 				{
 					await watchdogTask.ConfigureAwait(false);
 				}
+				catch (OperationCanceledException)
+				{
+					// Expected while stopping
+				}
 			}
-			catch (OperationCanceledException)
-			{
-				// Expected while stopping
-			}
-			finally
+
+			// When called from the watchdog itself (reconnect path), the token source is left to be
+			// collected: the watchdog task is already about to exit.
+			if (watchdogTask == null || Task.CurrentId != watchdogTask.Id)
 			{
 				cancellationTokenSource.Dispose();
 			}
@@ -867,28 +928,35 @@ namespace CatCore.Services.Twitch
 				}
 
 				var timeout = TimeSpan.FromSeconds(Math.Max(10, _keepAliveTimeoutSeconds));
-				if (DateTimeOffset.UtcNow - _lastEventSubMessageReceivedAt <= timeout + TimeSpan.FromSeconds(5))
+				var lastEventSubMessageAt = new DateTimeOffset(Interlocked.Read(ref _lastEventSubMessageTicks), TimeSpan.Zero);
+				if (DateTimeOffset.UtcNow - lastEventSubMessageAt <= timeout + TimeSpan.FromSeconds(5))
 				{
 					continue;
 				}
 
-				_lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+				// A reconnect attempt is already in flight; its 20s fallback window is longer than the
+				// keepalive threshold, so let the attempt finish instead of tearing it down here.
+				if (_reconnectAttemptTracker.HasPendingAttempt)
+				{
+					_logger.Verbose("EventSub keepalive timeout reached while a reconnect attempt is pending; deferring to the reconnect attempt");
+					Interlocked.Exchange(ref _lastEventSubMessageTicks, DateTimeOffset.UtcNow.Ticks);
+					continue;
+				}
+
+				Interlocked.Exchange(ref _lastEventSubMessageTicks, DateTimeOffset.UtcNow.Ticks);
 				_logger.Warning("No EventSub keepalive or notification received within {Timeout}; assuming the connection is lost and reconnecting", timeout);
 
-				// Reconnect from a separate task: RestartInternal stops this watchdog as part of StopInternal,
-				// and awaiting that from the watchdog itself would deadlock.
-				_ = Task.Run(async () =>
+				try
 				{
-					try
-					{
-						await Task.Delay(50).ConfigureAwait(false);
-						await RestartInternal().ConfigureAwait(false);
-					}
-					catch (Exception ex)
-					{
-						_logger.Warning(ex, "Failed to reconnect after an EventSub keepalive timeout");
-					}
-				});
+					await RestartInternal().ConfigureAwait(false);
+				}
+				catch (Exception ex)
+				{
+					_logger.Warning(ex, "Failed to reconnect after an EventSub keepalive timeout");
+				}
+
+				// RestartInternal cancels this watchdog as part of StopInternal; the loop is done.
+				break;
 			}
 		}
 
@@ -1556,9 +1624,7 @@ namespace CatCore.Services.Twitch
 
 			if (ev.CommunitySubGift.HasValue)
 			{
-				var communitySubGift = ev.CommunitySubGift.Value;
-				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = communitySubGift.SubTier;
-				AddLegacyGifterTags(metadata, communitySubGift.GifterIsAnonymous, communitySubGift.GifterUserLogin, communitySubGift.GifterUserName);
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ev.CommunitySubGift.Value.SubTier;
 			}
 
 			if (ev.GiftPaidUpgrade.HasValue)
@@ -1725,7 +1791,7 @@ namespace CatCore.Services.Twitch
 				"announcement" => GetPreferredDisplayName(ev),
 				"unraid" => $"{GetPreferredDisplayName(ev)} canceled the raid.",
 				"charity_donation" => BuildCharityDonationNotificationText(ev),
-				"watch_streak" => $"{GetPreferredDisplayName(ev)} reached a watch streak of {ev.WatchStreak?.StreakCount ?? 0} streams.",
+				"watch_streak" => BuildWatchStreakNotificationText(ev),
 				"modiversary" => $"{GetPreferredDisplayName(ev)} has been a moderator for {ev.Modiversary?.Months ?? 0} months.",
 				"gifted_drops_summary" => $"Gifted drops were granted to {ev.GiftedDropsSummary?.RecipientCount ?? 0} users.",
 				_ => string.Empty
@@ -1734,8 +1800,8 @@ namespace CatCore.Services.Twitch
 
 		private static string BuildCommunitySubGiftNotificationText(EventSubChatNotificationEvent ev)
 		{
-			var gifterName = ev.CommunitySubGift?.GifterUserName;
-			if (string.IsNullOrWhiteSpace(gifterName) || ev.CommunitySubGift?.GifterIsAnonymous == true)
+			var gifterName = GetPreferredDisplayName(ev);
+			if (string.IsNullOrWhiteSpace(gifterName))
 			{
 				gifterName = "An anonymous gifter";
 			}
@@ -1744,6 +1810,16 @@ namespace CatCore.Services.Twitch
 			return total > 1
 				? $"{gifterName} gifted {total} subscriptions to the community."
 				: $"{gifterName} gifted a subscription to the community.";
+		}
+
+		private static string BuildWatchStreakNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var watchStreak = ev.WatchStreak;
+			var streakCount = watchStreak?.StreakCount ?? 0;
+			var channelPointsAwarded = watchStreak?.ChannelPointsAwarded ?? 0;
+			return channelPointsAwarded > 0
+				? $"{GetPreferredDisplayName(ev)} reached a watch streak of {streakCount} streams ({channelPointsAwarded} channel points awarded)."
+				: $"{GetPreferredDisplayName(ev)} reached a watch streak of {streakCount} streams.";
 		}
 
 		private static string BuildCharityDonationNotificationText(EventSubChatNotificationEvent ev)
@@ -1755,9 +1831,18 @@ namespace CatCore.Services.Twitch
 			}
 
 			var amount = charity.Value.Amount;
-			var formattedAmount = string.IsNullOrWhiteSpace(amount.Value) ? string.Empty : $"{amount.Value} {amount.Currency}".Trim();
+			var formattedAmount = FormatLegacyMonetaryAmount(amount.Value, amount.DecimalPlaces, amount.Currency);
 			return $"{GetPreferredDisplayName(ev)} donated to {charity.Value.CharityName}".TrimEnd()
 			       + (formattedAmount.Length > 0 ? $" ({formattedAmount})" : string.Empty) + ".";
+		}
+
+		private static string FormatLegacyMonetaryAmount(int value, int decimalPlaces, string? currency)
+		{
+			var formattedValue = decimalPlaces <= 0
+				? value.ToString(CultureInfo.InvariantCulture)
+				: ((decimal)value / (decimal)Math.Pow(10, decimalPlaces)).ToString("F" + decimalPlaces, CultureInfo.InvariantCulture);
+			var currencySuffix = string.IsNullOrWhiteSpace(currency) ? string.Empty : " " + currency;
+			return formattedValue + currencySuffix;
 		}
 
 		private static string BuildRaidNotificationText(EventSubChatNotificationEvent ev)
@@ -1974,7 +2059,8 @@ namespace CatCore.Services.Twitch
 				return;
 			}
 
-			if (_subscriptionSessionId == _sessionId && _channelSubscriptionIds.ContainsKey(channelId))
+			var hasFailedSubscriptionTypes = _channelFailedSubscriptionTypes.TryGetValue(channelId, out var previouslyFailedTypes) && previouslyFailedTypes.Count > 0;
+			if (_subscriptionSessionId == _sessionId && _channelSubscriptionIds.ContainsKey(channelId) && !hasFailedSubscriptionTypes)
 			{
 				_logger.Verbose("Channel {ChannelId} is already subscribed for the current EventSub session", channelId);
 				return;
@@ -2033,6 +2119,27 @@ namespace CatCore.Services.Twitch
 
 				_channelSubscriptionIds[channelId] = subscriptionIds;
 				_subscriptionSessionId = _sessionId;
+
+				if (failedTypes.Count > 0)
+				{
+					// Remember the types that failed so the "already subscribed" fast path does not hide
+					// them until the next session/reconnect.
+					_channelFailedSubscriptionTypes[channelId] = new HashSet<string>(failedTypes, StringComparer.Ordinal);
+				}
+				else
+				{
+					_channelFailedSubscriptionTypes.TryRemove(channelId, out _);
+				}
+
+				// The channel now owns chat subscriptions; a connection keep-alive chat subscription
+				// would duplicate chat.message events, so remove it.
+				var keepAliveSubscriptionId = _keepAliveSubscriptionId;
+				_keepAliveSubscriptionId = null;
+				if (keepAliveSubscriptionId is { Length: > 0 })
+				{
+					await _twitchHelixApiService.DeleteEventSubSubscription(keepAliveSubscriptionId).ConfigureAwait(false);
+				}
+
 				if (failedTypes.Count > 0)
 				{
 					_logger.Warning("EventSub subscriptions partially created for channel {ChannelId}. Created={CreatedCount}, FailedTypes={FailedTypes}",
@@ -2296,6 +2403,8 @@ namespace CatCore.Services.Twitch
 
 		private async Task UnsubscribeFromChannelCoreInternal(string channelId, string? knownChannelName)
 		{
+			_channelFailedSubscriptionTypes.TryRemove(channelId, out _);
+
 			if (!_channelSubscriptionIds.TryRemove(channelId, out var subscriptionIds))
 			{
 				return;
@@ -2449,6 +2558,25 @@ namespace CatCore.Services.Twitch
 			{
 				_logger.Error(ex, "Consumer handler for {EventName} threw an exception", eventName);
 			}
+		}
+
+		/// <summary>
+		/// Runs a detached background operation with exception containment so fire-and-forget reconnect
+		/// work can never surface as an unobserved task exception.
+		/// </summary>
+		private void RunDetached(Func<Task> operation, string operationName)
+		{
+			_ = Task.Run(async () =>
+			{
+				try
+				{
+					await operation().ConfigureAwait(false);
+				}
+				catch (Exception ex)
+				{
+					_logger.Error(ex, "Background EventSub operation {OperationName} failed", operationName);
+				}
+			});
 		}
 
 		private static string GetSafeUriHost(string? url)

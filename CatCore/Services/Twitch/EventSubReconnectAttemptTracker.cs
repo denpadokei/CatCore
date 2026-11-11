@@ -24,7 +24,9 @@ namespace CatCore.Services.Twitch
 	/// <summary>
 	/// Owns the lifecycle of a single EventSub reconnect attempt. The fallback timer and the Welcome
 	/// handler race against each other; this tracker guarantees that only one of them can claim the
-	/// attempt, so a committed connection can never be aborted by a stale fallback timer.
+	/// attempt, so a committed connection can never be aborted by a stale fallback timer. Every
+	/// commit/abort carries the attempt's generation, so a late continuation from a previous attempt
+	/// can never claim a newer one.
 	/// </summary>
 	internal sealed class EventSubReconnectAttemptTracker<TProvider> where TProvider : class
 	{
@@ -33,6 +35,17 @@ namespace CatCore.Services.Twitch
 		private int _generation;
 		private CancellationTokenSource? _cancellationTokenSource;
 		private TProvider? _pendingProvider;
+
+		public bool HasPendingAttempt
+		{
+			get
+			{
+				lock (_lock)
+				{
+					return _state == ReconnectAttemptState.Pending;
+				}
+			}
+		}
 
 		public bool TryBegin(out ReconnectAttempt attempt)
 		{
@@ -74,12 +87,12 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		public bool TryCommit(out TProvider? provider)
+		public bool TryCommit(int generation, out TProvider? provider)
 		{
 			lock (_lock)
 			{
 				provider = null;
-				if (_state != ReconnectAttemptState.Pending || _pendingProvider == null)
+				if (_state != ReconnectAttemptState.Pending || _generation != generation || _pendingProvider == null)
 				{
 					return false;
 				}

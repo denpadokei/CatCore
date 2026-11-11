@@ -264,7 +264,7 @@ namespace CatCore.Services.Twitch
 				return message;
 			}
 
-			_logger.Warning("Message length exceeds {MaxCharacterCount} characters. Trimming to {MaxCharacterCount}", maxCharacterCount);
+			_logger.Warning("Message length exceeds {MaxCharacterCount} characters. Trimming", maxCharacterCount);
 			return message.Substring(0, index);
 		}
 	}

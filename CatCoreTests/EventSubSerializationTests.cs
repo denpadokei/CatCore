@@ -173,11 +173,7 @@ namespace CatCoreTests
 						""id"": ""gift-1"",
 						""total"": 5,
 						""sub_tier"": ""1000"",
-						""cumulative_total"": 12,
-						""gifter_is_anonymous"": false,
-						""gifter_user_id"": ""5678"",
-						""gifter_user_login"": ""gifter_login"",
-						""gifter_user_name"": ""Gifter_Name""
+						""cumulative_total"": 12
 					},
 					""prime_paid_upgrade"": { ""sub_tier"": ""1000"" }
 				}
@@ -190,9 +186,6 @@ namespace CatCoreTests
 			communitySubGift.Total.Should().Be(5);
 			communitySubGift.SubTier.Should().Be("1000");
 			communitySubGift.CumulativeTotal.Should().Be(12);
-			communitySubGift.GifterIsAnonymous.Should().BeFalse();
-			communitySubGift.GifterUserLogin.Should().Be("gifter_login");
-			communitySubGift.GifterUserName.Should().Be("Gifter_Name");
 
 			payload.Event.PrimePaidUpgrade.Should().NotBeNull();
 			payload.Event.PrimePaidUpgrade!.Value.SubTier.Should().Be("1000");
@@ -239,6 +232,63 @@ namespace CatCoreTests
 			response.Data[0].MessageId.Should().Be("message-id");
 			response.Data[0].IsSent.Should().Be(isSent);
 			response.Data[0].DropReason?.Code.Should().Be(dropReasonCode);
+		}
+
+		// The official charity_donation.amount.value is an integer in the currency's minor unit;
+		// modelling it as a string made every charity notice fail to deserialize.
+		[Fact]
+		public void ChatNotificationCharityDonationParsesIntegerAmount()
+		{
+			const string json = @"{
+				""event"": {
+					""broadcaster_user_id"": ""1337"",
+					""broadcaster_user_login"": ""cool_user"",
+					""broadcaster_user_name"": ""Cool_User"",
+					""chatter_user_id"": ""9001"",
+					""chatter_user_login"": ""viewer23"",
+					""chatter_user_name"": ""Viewer23"",
+					""notice_type"": ""charity_donation"",
+					""message"": { ""text"": """", ""fragments"": [] },
+					""charity_donation"": {
+						""charity_name"": ""Example Charity"",
+						""amount"": { ""value"": 550, ""decimal_places"": 2, ""currency"": ""USD"" }
+					}
+				}
+			}";
+
+			var payload = JsonSerializer.Deserialize(json, TwitchEventSubSerializerContext.Default.EventSubChatNotificationPayload);
+
+			payload.Event.CharityDonation.Should().NotBeNull();
+			var charity = payload.Event.CharityDonation!.Value;
+			charity.CharityName.Should().Be("Example Charity");
+			charity.Amount.Value.Should().Be(550);
+			charity.Amount.DecimalPlaces.Should().Be(2);
+			charity.Amount.Currency.Should().Be("USD");
+		}
+
+		// The official watch_streak object also carries channel_points_awarded.
+		[Fact]
+		public void ChatNotificationWatchStreakParsesChannelPointsAwarded()
+		{
+			const string json = @"{
+				""event"": {
+					""broadcaster_user_id"": ""1337"",
+					""broadcaster_user_login"": ""cool_user"",
+					""broadcaster_user_name"": ""Cool_User"",
+					""chatter_user_id"": ""9001"",
+					""chatter_user_login"": ""viewer23"",
+					""chatter_user_name"": ""Viewer23"",
+					""notice_type"": ""watch_streak"",
+					""message"": { ""text"": """", ""fragments"": [] },
+					""watch_streak"": { ""streak_count"": 14, ""channel_points_awarded"": 300 }
+				}
+			}";
+
+			var payload = JsonSerializer.Deserialize(json, TwitchEventSubSerializerContext.Default.EventSubChatNotificationPayload);
+
+			payload.Event.WatchStreak.Should().NotBeNull();
+			payload.Event.WatchStreak!.Value.StreakCount.Should().Be(14);
+			payload.Event.WatchStreak!.Value.ChannelPointsAwarded.Should().Be(300);
 		}
 	}
 }

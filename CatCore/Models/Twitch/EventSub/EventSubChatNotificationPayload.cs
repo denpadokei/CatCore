@@ -241,18 +241,6 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("cumulative_total")]
 		public int? CumulativeTotal { get; init; }
-
-		[JsonPropertyName("gifter_is_anonymous")]
-		public bool GifterIsAnonymous { get; init; }
-
-		[JsonPropertyName("gifter_user_id")]
-		public string? GifterUserId { get; init; }
-
-		[JsonPropertyName("gifter_user_name")]
-		public string? GifterUserName { get; init; }
-
-		[JsonPropertyName("gifter_user_login")]
-		public string? GifterUserLogin { get; init; }
 	}
 
 	[PublicAPI]
@@ -292,7 +280,7 @@ namespace CatCore.Models.Twitch.EventSub
 	public struct EventSubNotificationCharityAmount
 	{
 		[JsonPropertyName("value")]
-		public string Value { get; init; }
+		public int Value { get; init; }
 
 		[JsonPropertyName("decimal_places")]
 		public int DecimalPlaces { get; init; }
@@ -306,6 +294,9 @@ namespace CatCore.Models.Twitch.EventSub
 	{
 		[JsonPropertyName("streak_count")]
 		public int StreakCount { get; init; }
+
+		[JsonPropertyName("channel_points_awarded")]
+		public int ChannelPointsAwarded { get; init; }
 	}
 
 	[PublicAPI]

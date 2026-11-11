@@ -31,7 +31,7 @@ namespace CatCoreTests
 			var provider = new FakeProvider();
 			tracker.TryAttach(provider, attempt.Generation).Should().BeTrue();
 
-			tracker.TryCommit(out var committedProvider).Should().BeTrue();
+			tracker.TryCommit(attempt.Generation, out var committedProvider).Should().BeTrue();
 			committedProvider.Should().BeSameAs(provider);
 
 			tracker.TryAbort(attempt.Generation, out var abortedProvider).Should().BeFalse();
@@ -47,7 +47,7 @@ namespace CatCoreTests
 
 			tracker.TryAbort(attempt.Generation, out _).Should().BeTrue();
 
-			tracker.TryCommit(out var provider).Should().BeFalse();
+			tracker.TryCommit(attempt.Generation, out var provider).Should().BeFalse();
 			provider.Should().BeNull();
 		}
 
@@ -58,7 +58,7 @@ namespace CatCoreTests
 			tracker.TryBegin(out var attempt).Should().BeTrue();
 			tracker.TryAttach(new FakeProvider(), attempt.Generation).Should().BeTrue();
 
-			tracker.TryCommit(out _).Should().BeTrue();
+			tracker.TryCommit(attempt.Generation, out _).Should().BeTrue();
 
 			attempt.CancellationToken.IsCancellationRequested.Should().BeTrue();
 		}
@@ -76,6 +76,50 @@ namespace CatCoreTests
 			tracker.TryAbort(firstAttempt.Generation, out var abortedProvider).Should().BeFalse();
 			abortedProvider.Should().BeNull();
 			tracker.IsPending(secondAttempt.Generation).Should().BeTrue();
+		}
+
+		[Fact]
+		public void StaleGenerationCannotCommitANewerAttempt()
+		{
+			// A late Welcome continuation from an aborted attempt must not commit the candidate of the
+			// next attempt.
+			var tracker = new EventSubReconnectAttemptTracker<FakeProvider>();
+			tracker.TryBegin(out var firstAttempt).Should().BeTrue();
+			tracker.TryAbort(firstAttempt.Generation, out _).Should().BeTrue();
+
+			tracker.TryBegin(out var secondAttempt).Should().BeTrue();
+			var secondProvider = new FakeProvider();
+			tracker.TryAttach(secondProvider, secondAttempt.Generation).Should().BeTrue();
+
+			tracker.TryCommit(firstAttempt.Generation, out var committedProvider).Should().BeFalse();
+			committedProvider.Should().BeNull();
+			tracker.IsPending(secondAttempt.Generation).Should().BeTrue();
+		}
+
+		[Fact]
+		public void TryBeginWorksAgainAfterCommit()
+		{
+			var tracker = new EventSubReconnectAttemptTracker<FakeProvider>();
+			tracker.TryBegin(out var attempt).Should().BeTrue();
+			tracker.TryAttach(new FakeProvider(), attempt.Generation).Should().BeTrue();
+			tracker.TryCommit(attempt.Generation, out _).Should().BeTrue();
+
+			tracker.TryBegin(out var nextAttempt).Should().BeTrue();
+			nextAttempt.Generation.Should().BeGreaterThan(attempt.Generation);
+		}
+
+		[Fact]
+		public void HasPendingAttemptReflectsLifecycle()
+		{
+			var tracker = new EventSubReconnectAttemptTracker<FakeProvider>();
+			tracker.HasPendingAttempt.Should().BeFalse();
+
+			tracker.TryBegin(out var attempt).Should().BeTrue();
+			tracker.HasPendingAttempt.Should().BeTrue();
+
+			tracker.TryAttach(new FakeProvider(), attempt.Generation).Should().BeTrue();
+			tracker.TryCommit(attempt.Generation, out _).Should().BeTrue();
+			tracker.HasPendingAttempt.Should().BeFalse();
 		}
 
 		[Fact]
@@ -106,7 +150,7 @@ namespace CatCoreTests
 				var winners = 0;
 				var commitTask = Task.Run(() =>
 				{
-					if (tracker.TryCommit(out _))
+					if (tracker.TryCommit(attempt.Generation, out _))
 					{
 						Interlocked.Increment(ref winners);
 					}

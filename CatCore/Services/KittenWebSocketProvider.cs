@@ -48,7 +48,7 @@ namespace CatCore.Services
 			await Disconnect().ConfigureAwait(false);
 
 			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
-			_autoReconnectUrl = url;
+			Volatile.Write(ref _autoReconnectUrl, url);
 			var targetUri = new Uri(url);
 			_underlyingTcpClient = CreateTcpClient(targetUri);
 			_websocketClient = new MessageWebsocketRx(_underlyingTcpClient, hasTransferTcpSocketLifeCycleOwnership: true)
@@ -97,7 +97,7 @@ namespace CatCore.Services
 					or ConnectionStatus.ConnectionFailed
 					or ConnectionStatus.Close)
 				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for url: {Url}", tuple.state, url))
-				.Select(_ => Observable.FromAsync(() => Connect(_autoReconnectUrl ?? url)))
+				.Select(_ => Observable.FromAsync(() => Connect(Volatile.Read(ref _autoReconnectUrl) ?? url)))
 				.Concat()
 				.Subscribe();
 			_messageReceivedObservable = _websocketConnectionSubject
@@ -113,7 +113,7 @@ namespace CatCore.Services
 
 		public void UpdateAutoReconnectUrl(string url)
 		{
-			_autoReconnectUrl = url;
+			Volatile.Write(ref _autoReconnectUrl, url);
 		}
 
 		public async Task Disconnect(string? reason = null)
