@@ -1432,7 +1432,7 @@ namespace CatCore.Services.Twitch
 					user,
 					channel,
 					emotes.AsReadOnly(),
-					null, // Metadata (not needed for EventSub)
+					BuildSourceBroadcasterMetadata(ev.SourceBroadcasterUserId, ev.SourceBroadcasterUserLogin, ev.SourceBroadcasterUserName, ev.SourceMessageId, ev.SourceBadges, ev.IsSourceOnly),
 					"PRIVMSG", // IRC type equivalent
 					(uint)(ev.Cheer?.Bits ?? 0)
 				);
@@ -1644,7 +1644,57 @@ namespace CatCore.Services.Twitch
 				AddLegacyGifterTags(metadata, payItForward.GifterIsAnonymous, payItForward.GifterUserLogin, payItForward.GifterUserName);
 			}
 
+			AddSourceBroadcasterTags(metadata, ev.SourceBroadcasterUserId, ev.SourceBroadcasterUserLogin, ev.SourceBroadcasterUserName,
+				ev.SourceMessageId, ev.SourceBadges, ev.IsSourceOnly);
+
 			return new ReadOnlyDictionary<string, string>(metadata);
+		}
+
+		private static ReadOnlyDictionary<string, string>? BuildSourceBroadcasterMetadata(string? sourceBroadcasterUserId, string? sourceBroadcasterUserLogin,
+			string? sourceBroadcasterUserName, string? sourceMessageId, List<EventSubBadge>? sourceBadges, bool? isSourceOnly)
+		{
+			if (string.IsNullOrWhiteSpace(sourceBroadcasterUserId) && string.IsNullOrWhiteSpace(sourceMessageId))
+			{
+				return null;
+			}
+
+			var metadata = new Dictionary<string, string>(StringComparer.Ordinal);
+			AddSourceBroadcasterTags(metadata, sourceBroadcasterUserId, sourceBroadcasterUserLogin, sourceBroadcasterUserName, sourceMessageId, sourceBadges, isSourceOnly);
+			return new ReadOnlyDictionary<string, string>(metadata);
+		}
+
+		private static void AddSourceBroadcasterTags(Dictionary<string, string> metadata, string? sourceBroadcasterUserId, string? sourceBroadcasterUserLogin,
+			string? sourceBroadcasterUserName, string? sourceMessageId, List<EventSubBadge>? sourceBadges, bool? isSourceOnly)
+		{
+			if (!string.IsNullOrWhiteSpace(sourceBroadcasterUserId))
+			{
+				metadata[IrcMessageTags.SOURCE_BROADCASTER_USER_ID] = sourceBroadcasterUserId!;
+			}
+
+			if (!string.IsNullOrWhiteSpace(sourceBroadcasterUserLogin))
+			{
+				metadata[IrcMessageTags.SOURCE_BROADCASTER_LOGIN] = sourceBroadcasterUserLogin!;
+			}
+
+			if (!string.IsNullOrWhiteSpace(sourceBroadcasterUserName))
+			{
+				metadata[IrcMessageTags.SOURCE_BROADCASTER_NAME] = sourceBroadcasterUserName!;
+			}
+
+			if (!string.IsNullOrWhiteSpace(sourceMessageId))
+			{
+				metadata[IrcMessageTags.SOURCE_MESSAGE_ID] = sourceMessageId!;
+			}
+
+			if (sourceBadges is { Count: > 0 })
+			{
+				metadata[IrcMessageTags.SOURCE_BADGES] = string.Join(",", sourceBadges.Select(badge => $"{badge.SetId}/{badge.Id}"));
+			}
+
+			if (isSourceOnly == true)
+			{
+				metadata[IrcMessageTags.IS_SOURCE_ONLY] = "1";
+			}
 		}
 
 		private static void AddLegacyGifterTags(Dictionary<string, string> metadata, bool gifterIsAnonymous, string? gifterUserLogin, string? gifterUserName)
@@ -1675,9 +1725,20 @@ namespace CatCore.Services.Twitch
 			return string.IsNullOrWhiteSpace(subTier) ? string.Empty : subTier!;
 		}
 
-		private static string MapNoticeTypeToLegacyMsgId(string? noticeType)
+		internal static string MapNoticeTypeToLegacyMsgId(string? noticeType)
 		{
-			return noticeType switch
+			if (noticeType is not { Length: > 0 })
+			{
+				return "usernotice";
+			}
+
+			// Notices that happened in another channel of a shared-chat session use the same notice
+			// vocabulary with a shared_chat_ prefix; the legacy msg-id is identical.
+			var normalizedNoticeType = noticeType.StartsWith("shared_chat_", StringComparison.Ordinal)
+				? noticeType.Substring("shared_chat_".Length)
+				: noticeType;
+
+			return normalizedNoticeType switch
 			{
 				"sub" => "sub",
 				"resub" => "resub",
@@ -1690,7 +1751,6 @@ namespace CatCore.Services.Twitch
 				"unraid" => "unraid",
 				"announcement" => "announcement",
 				"bits_badge_tier" => "bitsbadgetier",
-				null or "" => "usernotice",
 				_ => noticeType
 			};
 		}
@@ -1777,7 +1837,11 @@ namespace CatCore.Services.Twitch
 				return ev.SystemMessage ?? string.Empty;
 			}
 
-			return ev.NoticeType switch
+			var normalizedNoticeType = ev.NoticeType is { Length: > 0 } noticeType && noticeType.StartsWith("shared_chat_", StringComparison.Ordinal)
+				? noticeType.Substring("shared_chat_".Length)
+				: ev.NoticeType;
+
+			return normalizedNoticeType switch
 			{
 				"raid" => BuildRaidNotificationText(ev),
 				"sub" => $"{GetPreferredDisplayName(ev)} subscribed.",

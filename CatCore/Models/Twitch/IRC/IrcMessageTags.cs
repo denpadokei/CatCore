@@ -1,4 +1,4 @@
-﻿namespace CatCore.Models.Twitch.IRC
+namespace CatCore.Models.Twitch.IRC
 {
 	/// <summary>
 	/// All IRC message tag keys that are publicly described by Twitch documentation
@@ -55,6 +55,12 @@
 		public const string MSG_PARAM_SUB_PLAN_NAME = "msg-param-sub-plan-name";
 		public const string MSG_PARAM_VIEWER_COUNT = "msg-param-viewerCount";
 		public const string MSG_PARAM_PROFILE_IMAGE_URL = "msg-param-profileImageURL";
+		public const string SOURCE_BROADCASTER_USER_ID = "source-broadcaster-user-id";
+		public const string SOURCE_BROADCASTER_LOGIN = "source-broadcaster-login";
+		public const string SOURCE_BROADCASTER_NAME = "source-broadcaster-name";
+		public const string SOURCE_MESSAGE_ID = "source-message-id";
+		public const string SOURCE_BADGES = "source-badges";
+		public const string IS_SOURCE_ONLY = "is-source-only";
 		public const string MSG_PARAM_RITUAL_NAME = "msg-param-ritual-name";
 		public const string MSG_PARAM_THRESHOLD = "msg-param-threshold";
 		public const string MSG_PARAM_GIFT_MONTHS = "msg-param-gift-months";

@@ -99,6 +99,59 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("gifted_drops_summary")]
 		public EventSubNotificationGiftedDropsSummary? GiftedDropsSummary { get; init; }
+
+		// Shared chat: the event carries the source channel/message it originated from.
+		[JsonPropertyName("source_broadcaster_user_id")]
+		public string? SourceBroadcasterUserId { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_login")]
+		public string? SourceBroadcasterUserLogin { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_name")]
+		public string? SourceBroadcasterUserName { get; init; }
+
+		[JsonPropertyName("source_message_id")]
+		public string? SourceMessageId { get; init; }
+
+		[JsonPropertyName("source_badges")]
+		public List<EventSubBadge>? SourceBadges { get; init; }
+
+		[JsonPropertyName("is_source_only")]
+		public bool? IsSourceOnly { get; init; }
+
+		// Shared-chat notice objects. These have the same shape as their non-shared counterparts.
+		[JsonPropertyName("shared_chat_sub")]
+		public EventSubNotificationSub? SharedChatSub { get; init; }
+
+		[JsonPropertyName("shared_chat_resub")]
+		public EventSubNotificationResub? SharedChatResub { get; init; }
+
+		[JsonPropertyName("shared_chat_sub_gift")]
+		public EventSubNotificationGiftSub? SharedChatSubGift { get; init; }
+
+		[JsonPropertyName("shared_chat_community_sub_gift")]
+		public EventSubNotificationCommunitySubGift? SharedChatCommunitySubGift { get; init; }
+
+		[JsonPropertyName("shared_chat_gift_paid_upgrade")]
+		public EventSubNotificationGiftPaidUpgrade? SharedChatGiftPaidUpgrade { get; init; }
+
+		[JsonPropertyName("shared_chat_prime_paid_upgrade")]
+		public EventSubNotificationPrimePaidUpgrade? SharedChatPrimePaidUpgrade { get; init; }
+
+		[JsonPropertyName("shared_chat_pay_it_forward")]
+		public EventSubNotificationPayItForward? SharedChatPayItForward { get; init; }
+
+		[JsonPropertyName("shared_chat_raid")]
+		public EventSubNotificationRaid? SharedChatRaid { get; init; }
+
+		[JsonPropertyName("shared_chat_announcement")]
+		public EventSubNotificationAnnouncement? SharedChatAnnouncement { get; init; }
+
+		[JsonPropertyName("shared_chat_modiversary")]
+		public EventSubNotificationModiversary? SharedChatModiversary { get; init; }
+
+		[JsonPropertyName("shared_chat_gifted_drops_summary")]
+		public EventSubNotificationGiftedDropsSummary? SharedChatGiftedDropsSummary { get; init; }
 	}
 
 	[PublicAPI]
