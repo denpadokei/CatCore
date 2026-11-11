@@ -225,7 +225,9 @@ namespace CatCore.Services.Twitch.Media
 						fragmentSearchOffset = fragStart + fragment.Text.Length;
 					}
 
-					if (fragment.Type == "text")
+					// Bits cheermotes arrive as their own "cheermote" fragments; feed those through the
+					// same word-based cheermote/third-party emote detection as plain text fragments.
+					if (fragment.Type is "text" or "cheermote")
 					{
 						ExtractOtherEmotesFromText(emotes, fragment.Text, message, channelId, twitchConfig.ParseCheermotes && bits > 0, twitchConfig.ParseBttvEmotes || twitchConfig.ParseFfzEmotes, fragStart >= 0 ? fragStart : 0);
 					}

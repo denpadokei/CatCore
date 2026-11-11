@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using CatCore.Models.Credentials;
 using CatCore.Models.Twitch.OAuth;
@@ -22,7 +22,7 @@ namespace CatCore.Services.Twitch.Interfaces
 		string AuthorizationUrl(string redirectUrl);
 		Task GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl);
 		Task<ValidationResponse?> ValidateAccessToken(TwitchCredentials credentials, bool resetDataOnFailure = true);
-		Task<bool> RefreshTokens();
+		Task<bool> RefreshTokens(bool force = false);
 		Task<bool> RevokeTokens();
 	}
 }

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Reactive.Linq;
@@ -23,6 +23,7 @@ namespace CatCore.Services
 
 		private TcpClient? _underlyingTcpClient;
 		private MessageWebsocketRx? _websocketClient;
+		private string? _autoReconnectUrl;
 
 		private IDisposable? _disposableWebsocketSubscription;
 		private Subject<(IDataframe? dataframe, ConnectionStatus state)>? _websocketConnectionSubject;
@@ -47,6 +48,7 @@ namespace CatCore.Services
 			await Disconnect().ConfigureAwait(false);
 
 			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
+			_autoReconnectUrl = url;
 			var targetUri = new Uri(url);
 			_underlyingTcpClient = CreateTcpClient(targetUri);
 			_websocketClient = new MessageWebsocketRx(_underlyingTcpClient, hasTransferTcpSocketLifeCycleOwnership: true)
@@ -95,7 +97,7 @@ namespace CatCore.Services
 					or ConnectionStatus.ConnectionFailed
 					or ConnectionStatus.Close)
 				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for url: {Url}", tuple.state, url))
-				.Select(_ => Observable.FromAsync(() => Connect(url)))
+				.Select(_ => Observable.FromAsync(() => Connect(_autoReconnectUrl ?? url)))
 				.Concat()
 				.Subscribe();
 			_messageReceivedObservable = _websocketConnectionSubject
@@ -109,9 +111,13 @@ namespace CatCore.Services
 			await tcs.Task;
 		}
 
-		public async Task Disconnect(string? reason = null)
+		public void UpdateAutoReconnectUrl(string url)
 		{
-			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
+			_autoReconnectUrl = url;
+		}
+
+		public async Task Disconnect(string? reason = null)
+		{			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
 			if (_websocketClient == null)
 			{
 				return;

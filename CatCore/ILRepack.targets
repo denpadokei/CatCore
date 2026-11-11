@@ -31,6 +31,7 @@
 			<RepackInputAssemblies Include="Serilog.dll"/>
 			<RepackInputAssemblies Include="Serilog.Sinks.Async.dll"/>
 			<RepackInputAssemblies Include="System.Buffers.dll"/>
+			<RepackInputAssemblies Include="System.IO.Pipelines.dll"/>
 			<RepackInputAssemblies Include="System.Memory.dll"/>
 			<RepackInputAssemblies Include="System.Net.Http.Json.dll"/>
 			<RepackInputAssemblies Include="System.Numerics.Vectors.dll"/>

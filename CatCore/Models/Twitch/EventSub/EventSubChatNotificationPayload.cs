@@ -34,6 +34,18 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("chatter_user_name")]
 		public string ChatterUserName { get; init; }
 
+		[JsonPropertyName("chatter_is_anonymous")]
+		public bool ChatterIsAnonymous { get; init; }
+
+		[JsonPropertyName("color")]
+		public string Color { get; init; }
+
+		[JsonPropertyName("badges")]
+		public List<EventSubBadge>? Badges { get; init; }
+
+		[JsonPropertyName("message_id")]
+		public string MessageId { get; init; }
+
 		[JsonPropertyName("notice_type")]
 		public string NoticeType { get; init; }
 
@@ -49,8 +61,8 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("resub")]
 		public EventSubNotificationResub? Resub { get; init; }
 
-		[JsonPropertyName("gift_sub")]
-		public EventSubNotificationGiftSub? GiftSub { get; init; }
+		[JsonPropertyName("sub_gift")]
+		public EventSubNotificationGiftSub? SubGift { get; init; }
 
 		[JsonPropertyName("raid")]
 		public EventSubNotificationRaid? Raid { get; init; }
@@ -71,8 +83,8 @@ namespace CatCore.Models.Twitch.EventSub
 	[PublicAPI]
 	public struct EventSubNotificationSub
 	{
-		[JsonPropertyName("is_gift")]
-		public bool IsGift { get; init; }
+		[JsonPropertyName("is_prime")]
+		public bool IsPrime { get; init; }
 
 		[JsonPropertyName("sub_tier")]
 		public string SubTier { get; init; }
@@ -93,11 +105,26 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("streak_months")]
 		public int? StreakMonths { get; init; }
 
-		[JsonPropertyName("is_streak")]
-		public bool IsStreak { get; init; }
-
 		[JsonPropertyName("sub_tier")]
 		public string SubTier { get; init; }
+
+		[JsonPropertyName("is_prime")]
+		public bool? IsPrime { get; init; }
+
+		[JsonPropertyName("is_gift")]
+		public bool IsGift { get; init; }
+
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool? GifterIsAnonymous { get; init; }
+
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
 	}
 
 	[PublicAPI]
@@ -123,9 +150,6 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("sub_tier")]
 		public string SubTier { get; init; }
-
-		[JsonPropertyName("community_gift_ids")]
-		public List<string>? CommunityGiftIds { get; init; }
 	}
 
 	[PublicAPI]
@@ -142,6 +166,9 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("viewer_count")]
 		public int ViewerCount { get; init; }
+
+		[JsonPropertyName("profile_image_url")]
+		public string? ProfileImageUrl { get; init; }
 	}
 
 	[PublicAPI]
@@ -152,11 +179,17 @@ namespace CatCore.Models.Twitch.EventSub
 	[PublicAPI]
 	public struct EventSubNotificationPayItForward
 	{
-		[JsonPropertyName("is_anonymous")]
-		public bool IsAnonymous { get; init; }
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool GifterIsAnonymous { get; init; }
 
-		[JsonPropertyName("community_gift_id")]
-		public string? CommunityGiftId { get; init; }
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
 	}
 
 	[PublicAPI]

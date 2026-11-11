@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -29,6 +29,7 @@ namespace CatCore.Services.Twitch
 
 		private readonly HttpClient _helixClient;
 		private readonly AsyncPolicyWrap<HttpResponseMessage> _combinedHelixPolicy;
+		private readonly AsyncPolicyWrap<HttpResponseMessage> _combinedHelixWritePolicy;
 
 		internal TwitchHelixApiService(ILogger logger, ITwitchAuthService twitchAuthService, ConstantsBase constants, Version libraryVersion)
 		{
@@ -44,7 +45,7 @@ namespace CatCore.Services.Twitch
 				.RetryAsync(1, async (_, _, _) =>
 				{
 					_logger.Information("Attempting re-auth");
-					await twitchAuthService.RefreshTokens().ConfigureAwait(false);
+					await twitchAuthService.RefreshTokens(force: true).ConfigureAwait(false);
 				});
 
 			var enhanceYourCalmPolicy = Policy
@@ -54,12 +55,17 @@ namespace CatCore.Services.Twitch
 					(retryAttempt, response, _) =>
 					{
 						response.Result.Headers.TryGetValues("Ratelimit-Reset", out var values);
-						if (values != null && long.TryParse(values.FirstOrDefault(), out var unixMillisTillReset))
+						if (values != null && long.TryParse(values.FirstOrDefault(), out var resetValue))
 						{
-							return TimeSpan.FromMilliseconds(unixMillisTillReset - DateTimeOffset.Now.ToUnixTimeMilliseconds());
+							// Twitch sends Ratelimit-Reset as a Unix epoch timestamp in seconds.
+							var resetAt = resetValue > 100_000_000_000L
+								? DateTimeOffset.FromUnixTimeMilliseconds(resetValue)
+								: DateTimeOffset.FromUnixTimeSeconds(resetValue);
+							var delay = resetAt - DateTimeOffset.UtcNow;
+							return delay > TimeSpan.Zero ? delay : TimeSpan.FromSeconds(1);
 						}
 
-						return TimeSpan.FromSeconds(Math.Pow(10, retryAttempt));
+						return TimeSpan.FromSeconds(Math.Min(60, Math.Pow(2, retryAttempt)));
 					},
 					((_, timeSpan, _, _) =>
 					{
@@ -75,6 +81,11 @@ namespace CatCore.Services.Twitch
 			var bulkheadPolicy = Policy.BulkheadAsync<HttpResponseMessage>(4, 1000);
 
 			_combinedHelixPolicy = Policy.WrapAsync(bulkheadPolicy, enhanceYourCalmPolicy, reAuthPolicy, exceptionRetryPolicy);
+
+			// Non-idempotent writes must not be retried after transport failures: the request may already
+			// have been processed by Twitch, so retrying would duplicate the side effect (chat message,
+			// EventSub subscription). Rate-limit and re-auth handling is still applied.
+			_combinedHelixWritePolicy = Policy.WrapAsync(bulkheadPolicy, enhanceYourCalmPolicy, reAuthPolicy);
 		}
 
 		private async Task<ValidationResponse> CheckUserLoggedIn()
