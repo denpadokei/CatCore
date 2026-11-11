@@ -97,6 +97,8 @@ namespace CatCore.Services.Twitch
 		private Task? _sendQueueTask;
 
 		private readonly SemaphoreSlim _restartSemaphoreSlim = new(1, 1);
+		private readonly SemaphoreSlim _revocationHandlingSemaphoreSlim = new(1, 1);
+		private readonly EventSubRevocationPolicy _revocationPolicy = new();
 		private readonly EventSubReconnectAttemptTracker<IKittenWebSocketProvider> _reconnectAttemptTracker = new();
 		private AsyncEventHandlerDefinitions.AsyncEventHandler<WebSocketConnection, string>? _pendingReconnectMessageReceivedHandler;
 		private readonly ConcurrentDictionary<string, HashSet<string>> _channelFailedSubscriptionTypes = new(StringComparer.Ordinal);
@@ -2010,7 +2012,7 @@ namespace CatCore.Services.Twitch
 				_logger.Warning("EventSub subscription revoked. Type={SubscriptionType}, Status={SubscriptionStatus}, SubscriptionId={SubscriptionId}",
 					subscriptionType, status, subscriptionId);
 
-				_ = Task.Run(() => HandleRevocationAsync(subscriptionId, subscriptionType, status, broadcasterUserId));
+				RunDetached(() => HandleRevocationAsync(subscriptionId, subscriptionType, status, broadcasterUserId), "EventSub revocation handling");
 			}
 			catch (Exception ex)
 			{
@@ -2020,21 +2022,36 @@ namespace CatCore.Services.Twitch
 
 		private async Task HandleRevocationAsync(string subscriptionId, string subscriptionType, string status, string? broadcasterUserId)
 		{
+			// Revocations arrive in bursts (one per subscription); serialize them so sibling revocations
+			// cannot race the reconnect tracker or each other.
+			await _revocationHandlingSemaphoreSlim.WaitAsync().ConfigureAwait(false);
 			try
 			{
 				await RemoveTrackedSubscriptionAsync(broadcasterUserId, subscriptionId).ConfigureAwait(false);
 
-				var action = ClassifyRevocation(status);
+				var action = EventSubRevocationPolicy.Classify(status);
 				_logger.Warning("Handling revoked EventSub subscription. Type={SubscriptionType}, Status={SubscriptionStatus}, Action={RevocationAction}",
 					subscriptionType, status, action);
 
 				switch (action)
 				{
 					case EventSubRevocationAction.ForceReauth:
+						if (!_revocationPolicy.TryBeginAuthorizationRefresh())
+						{
+							_logger.Verbose("Coalescing authorization-revocation burst; a refresh/restart cycle already started within the cooldown window");
+							break;
+						}
+
 						if (!await _twitchAuthService.RefreshTokens(force: true).ConfigureAwait(false))
 						{
 							_logger.Error("Token refresh after an EventSub authorization revocation failed; user re-authorization is required");
+							break;
 						}
+
+						// Restart explicitly: the rotated credentials may compare equal to the stored ones,
+						// in which case UpdateCredentials does not restart the transport and the revoked
+						// subscriptions would never be recreated.
+						await RestartInternal().ConfigureAwait(false);
 						break;
 					case EventSubRevocationAction.DetachChannel:
 						if (broadcasterUserId is { Length: > 0 } detachedChannelId)
@@ -2042,22 +2059,11 @@ namespace CatCore.Services.Twitch
 							await DetachChannelAsync(detachedChannelId).ConfigureAwait(false);
 						}
 						break;
-					case EventSubRevocationAction.ResubscribeChannel:
-						if (broadcasterUserId is { Length: > 0 } resubscribeChannelId)
-						{
-							var channelName = ResolveChannelName(resubscribeChannelId);
-							if (channelName != null)
-							{
-								await SubscribeToChannelInternal(resubscribeChannelId, channelName, forceResubscribe: true).ConfigureAwait(false);
-							}
-							else
-							{
-								_logger.Warning("Cannot resubscribe revoked EventSub subscriptions for channel {ChannelId}: it is not an active channel", resubscribeChannelId);
-							}
-						}
-						break;
 					case EventSubRevocationAction.LogVersionRemoved:
 						_logger.Error("EventSub subscription type {SubscriptionType} was revoked because its version was removed; update CatCore to a version that supports the current Twitch API", subscriptionType);
+						break;
+					case EventSubRevocationAction.Ignore:
+						_logger.Warning("Ignoring EventSub revocation with unknown status {SubscriptionStatus}; waiting for the next reconnect cycle", status);
 						break;
 				}
 			}
@@ -2065,24 +2071,15 @@ namespace CatCore.Services.Twitch
 			{
 				_logger.Warning(ex, "Failed to handle a revoked EventSub subscription");
 			}
-		}
-
-		internal static EventSubRevocationAction ClassifyRevocation(string? status)
-		{
-			return status switch
+			finally
 			{
-				"authorization_revoked" => EventSubRevocationAction.ForceReauth,
-				"user_removed" => EventSubRevocationAction.DetachChannel,
-				"moderator_removed" => EventSubRevocationAction.DetachChannel,
-				"chat_user_banned" => EventSubRevocationAction.DetachChannel,
-				"version_removed" => EventSubRevocationAction.LogVersionRemoved,
-				_ => EventSubRevocationAction.ResubscribeChannel
-			};
+				_revocationHandlingSemaphoreSlim.Release();
+			}
 		}
 
 		private async Task RemoveTrackedSubscriptionAsync(string? channelId, string subscriptionId)
 		{
-			if (channelId is not { Length: > 0 } || string.IsNullOrEmpty(subscriptionId))
+			if (string.IsNullOrEmpty(subscriptionId))
 			{
 				return;
 			}
@@ -2090,24 +2087,41 @@ namespace CatCore.Services.Twitch
 			await _subscriptionManagementSemaphoreSlim.WaitAsync().ConfigureAwait(false);
 			try
 			{
-				if (!_channelSubscriptionIds.TryGetValue(channelId, out var subscriptionIds))
+				if (channelId is { Length: > 0 } && _channelSubscriptionIds.TryGetValue(channelId, out var subscriptionIds))
 				{
+					ReplaceTrackedSubscriptionIdsLocked(channelId, subscriptionIds, subscriptionId);
 					return;
 				}
 
-				var remainingSubscriptionIds = subscriptionIds.Where(id => !string.Equals(id, subscriptionId, StringComparison.Ordinal)).ToList();
-				if (remainingSubscriptionIds.Count == 0)
+				// The broadcaster id is missing from the revocation condition; still drop the revoked id
+				// so the tracked state cannot keep it forever.
+				foreach (var trackedChannel in _channelSubscriptionIds)
 				{
-					_channelSubscriptionIds.TryRemove(channelId, out _);
-				}
-				else
-				{
-					_channelSubscriptionIds[channelId] = remainingSubscriptionIds;
+					if (!trackedChannel.Value.Contains(subscriptionId, StringComparer.Ordinal))
+					{
+						continue;
+					}
+
+					ReplaceTrackedSubscriptionIdsLocked(trackedChannel.Key, trackedChannel.Value, subscriptionId);
+					return;
 				}
 			}
 			finally
 			{
 				_subscriptionManagementSemaphoreSlim.Release();
+			}
+		}
+
+		private void ReplaceTrackedSubscriptionIdsLocked(string channelId, List<string> subscriptionIds, string removedSubscriptionId)
+		{
+			var remainingSubscriptionIds = subscriptionIds.Where(id => !string.Equals(id, removedSubscriptionId, StringComparison.Ordinal)).ToList();
+			if (remainingSubscriptionIds.Count == 0)
+			{
+				_channelSubscriptionIds.TryRemove(channelId, out _);
+			}
+			else
+			{
+				_channelSubscriptionIds[channelId] = remainingSubscriptionIds;
 			}
 		}
 
@@ -2118,6 +2132,7 @@ namespace CatCore.Services.Twitch
 			try
 			{
 				_channelSubscriptionIds.TryRemove(channelId, out remainingSubscriptionIds);
+				_channelFailedSubscriptionTypes.TryRemove(channelId, out _);
 			}
 			finally
 			{

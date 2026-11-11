@@ -6,16 +6,16 @@ namespace CatCore.Services.Twitch
 	/// </summary>
 	internal enum EventSubRevocationAction
 	{
-		/// <summary>The authorization behind the subscription is gone; refresh the token and let the restart re-subscribe.</summary>
+		/// <summary>The authorization behind the subscription is gone; refresh the token and restart explicitly.</summary>
 		ForceReauth,
 
-		/// <summary>The user can no longer receive this channel's events (removed/banned/moderator removed); detach the channel.</summary>
+		/// <summary>The user can no longer receive this channel's events; detach the channel.</summary>
 		DetachChannel,
 
 		/// <summary>The subscription type/version is no longer supported by Twitch; only an update can fix it.</summary>
 		LogVersionRemoved,
 
-		/// <summary>Transient/unknown reason; reconcile by re-subscribing the channel.</summary>
-		ResubscribeChannel
+		/// <summary>Unknown/undocumented status; log and ignore it until the next reconnect cycle.</summary>
+		Ignore
 	}
 }
