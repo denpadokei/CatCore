@@ -49,11 +49,13 @@ namespace CatCore.Services.Twitch
 			"channel:manage:redemptions",
 			"channel:moderate",
 			"channel:read:ads",
+			"channel:read:chat_settings",
 			"channel:read:subscriptions",
 			"moderator:manage:announcements",
 			"moderator:manage:banned_users",
 			"moderator:manage:chat_messages",
 			"moderator:manage:chat_settings",
+			"moderator:read:chat_settings",
 			"moderator:read:followers",
 			"user:manage:chat_color",
 			"user:read:follows"

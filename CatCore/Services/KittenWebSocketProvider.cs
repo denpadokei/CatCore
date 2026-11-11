@@ -106,7 +106,7 @@ namespace CatCore.Services
 				.Concat()
 				.Subscribe();
 
-			websocketConnectionObservable.Subscribe(_websocketConnectionSubject);
+			_disposableWebsocketSubscription = websocketConnectionObservable.Subscribe(_websocketConnectionSubject);
 
 			await tcs.Task;
 		}
@@ -117,7 +117,8 @@ namespace CatCore.Services
 		}
 
 		public async Task Disconnect(string? reason = null)
-		{			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
+		{
+			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
 			if (_websocketClient == null)
 			{
 				return;
@@ -142,6 +143,7 @@ namespace CatCore.Services
 			_messageReceivedObservable?.Dispose();
 			_messageReceivedObservable = null;
 
+			_underlyingTcpClient?.Dispose();
 			_underlyingTcpClient = null;
 
 			_websocketClient = null;

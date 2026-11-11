@@ -154,6 +154,72 @@ namespace CatCoreTests
 			fragment.Cheermote!.Value.Bits.Should().Be(100);
 		}
 
+		// Regression test for the notification notice objects that were previously not modelled:
+		// community_sub_gift, prime_paid_upgrade (and the gifter fields) must bind.
+		[Fact]
+		public void ChatNotificationCommunitySubGiftAndPrimeUpgradeBind()
+		{
+			const string json = @"{
+				""event"": {
+					""broadcaster_user_id"": ""1337"",
+					""broadcaster_user_login"": ""cool_user"",
+					""broadcaster_user_name"": ""Cool_User"",
+					""chatter_user_id"": ""9001"",
+					""chatter_user_login"": ""viewer23"",
+					""chatter_user_name"": ""Viewer23"",
+					""notice_type"": ""community_sub_gift"",
+					""message"": { ""text"": """", ""fragments"": [] },
+					""community_sub_gift"": {
+						""id"": ""gift-1"",
+						""total"": 5,
+						""sub_tier"": ""1000"",
+						""cumulative_total"": 12,
+						""gifter_is_anonymous"": false,
+						""gifter_user_id"": ""5678"",
+						""gifter_user_login"": ""gifter_login"",
+						""gifter_user_name"": ""Gifter_Name""
+					},
+					""prime_paid_upgrade"": { ""sub_tier"": ""1000"" }
+				}
+			}";
+
+			var payload = JsonSerializer.Deserialize(json, TwitchEventSubSerializerContext.Default.EventSubChatNotificationPayload);
+
+			payload.Event.CommunitySubGift.Should().NotBeNull();
+			var communitySubGift = payload.Event.CommunitySubGift!.Value;
+			communitySubGift.Total.Should().Be(5);
+			communitySubGift.SubTier.Should().Be("1000");
+			communitySubGift.CumulativeTotal.Should().Be(12);
+			communitySubGift.GifterIsAnonymous.Should().BeFalse();
+			communitySubGift.GifterUserLogin.Should().Be("gifter_login");
+			communitySubGift.GifterUserName.Should().Be("Gifter_Name");
+
+			payload.Event.PrimePaidUpgrade.Should().NotBeNull();
+			payload.Event.PrimePaidUpgrade!.Value.SubTier.Should().Be("1000");
+		}
+
+		// The Welcome message carries keepalive_timeout_seconds as a value (nullable model); the keepalive
+		// watchdog relies on it.
+		[Fact]
+		public void SessionWelcomePayloadExposesKeepaliveTimeout()
+		{
+			const string json = @"{
+				""session"": {
+					""id"": ""AQoQILE98gtqShGmLD7AM6yJThAB"",
+					""status"": ""connected"",
+					""keepalive_timeout_seconds"": 10,
+					""reconnect_url"": null,
+					""connected_at"": ""2023-07-19T14:56:51.616329898Z""
+				}
+			}";
+
+			var payload = JsonSerializer.Deserialize(json, TwitchEventSubSerializerContext.Default.EventSubSessionPayload);
+
+			payload.Session.Id.Should().Be("AQoQILE98gtqShGmLD7AM6yJThAB");
+			payload.Session.KeepaliveTimeoutSeconds.Should().Be(10);
+			payload.Session.ReconnectUrl.Should().BeNull();
+		}
+
 		// Helix Send Chat Message returns 200 with is_sent/drop_reason; the previous implementation only
 		// looked at the status code, so dropped messages were reported as sent.
 		[Theory]

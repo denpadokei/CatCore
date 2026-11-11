@@ -60,7 +60,7 @@ namespace CatCore.Services.Twitch
 		private const int HELIX_USER_IDS_PER_REQUEST_LIMIT = 100;
 
 		private readonly ILogger _logger;
-		private readonly IKittenWebSocketProvider _kittenWebSocketProvider;
+		private IKittenWebSocketProvider _kittenWebSocketProvider;
 		private readonly IKittenPlatformActiveStateManager _activeStateManager;
 		private readonly ITwitchAuthService _twitchAuthService;
 		private readonly ITwitchChannelManagementService _twitchChannelManagementService;
@@ -94,6 +94,17 @@ namespace CatCore.Services.Twitch
 		private readonly object _sendQueueStateLock = new();
 		private CancellationTokenSource? _sendQueueCancellationTokenSource;
 		private Task? _sendQueueTask;
+
+		private readonly object _reconnectStateLock = new();
+		private IKittenWebSocketProvider? _pendingReconnectWebSocketProvider;
+		private bool _pendingReconnectIsCommitted;
+		private bool _reconnectInProgress;
+
+		private readonly object _keepAliveWatchdogStateLock = new();
+		private CancellationTokenSource? _keepAliveWatchdogCancellationTokenSource;
+		private Task? _keepAliveWatchdogTask;
+		private DateTimeOffset _lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+		private int _keepAliveTimeoutSeconds = 10;
 
 		public TwitchEventSubChatService(ILogger logger, IKittenWebSocketProvider kittenWebSocketProvider, IKittenPlatformActiveStateManager activeStateManager,
 			ITwitchAuthService twitchAuthService, ITwitchChannelManagementService twitchChannelManagementService, ITwitchRoomStateTrackerService roomStateTrackerService,
@@ -306,6 +317,8 @@ namespace CatCore.Services.Twitch
 				return;
 			}
 
+			SeedGlobalUserState();
+
 			_kittenWebSocketProvider.ConnectHappened -= ConnectHappenedHandler;
 			_kittenWebSocketProvider.ConnectHappened += ConnectHappenedHandler;
 
@@ -333,8 +346,10 @@ namespace CatCore.Services.Twitch
 		{
 			using var _ = await Synchronization.LockAsync(_connectionLockerSemaphoreSlim);
 
+			await AbortPendingReconnectAsync().ConfigureAwait(false);
 			await StopViewCountPollingIfRunning().ConfigureAwait(false);
 			await StopSendQueueWorker().ConfigureAwait(false);
+			await StopKeepAliveWatchdog().ConfigureAwait(false);
 
 			// Unsubscribe from all channels
 			var channelIds = _channelSubscriptionIds.Keys.ToList();
@@ -446,6 +461,7 @@ namespace CatCore.Services.Twitch
 
 		private void MessageReceivedHandlerInternal(WebSocketConnection webSocketConnection, string rawMessage)
 		{
+			_lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
 #if DEBUG
 			_logger.Verbose("EventSub message received: {Message}", rawMessage);
 #endif
@@ -507,6 +523,7 @@ namespace CatCore.Services.Twitch
 					TwitchEventSubSerializerContext.Default.EventSubSessionPayload);
 
 				_sessionId = payload.Session.Id;
+				_keepAliveTimeoutSeconds = payload.Session.KeepaliveTimeoutSeconds ?? 10;
 				var inheritedSubscriptions = _connectedViaReconnectUrl;
 				_connectedViaReconnectUrl = false;
 				if (inheritedSubscriptions)
@@ -525,6 +542,7 @@ namespace CatCore.Services.Twitch
 
 				InvokeSafely(OnChatConnected, nameof(OnChatConnected));
 				TryStartViewCountPollingIfNeeded();
+				StartKeepAliveWatchdog();
 
 				_ = Task.Run(() => InitializeSubscriptionsForSession(inheritedSubscriptions));
 			}
@@ -586,26 +604,284 @@ namespace CatCore.Services.Twitch
 					jsonDocument.RootElement.GetProperty("payload"),
 					TwitchEventSubSerializerContext.Default.EventSubSessionPayload);
 
-				_reconnectUrl = payload.Session.ReconnectUrl;
-
+				var reconnectUrl = payload.Session.ReconnectUrl;
 				// Do not log the reconnect URL itself: it is a per-session, credential-like value.
-				_logger.Information("EventSub session reconnect requested. New host: {ReconnectHost}", GetSafeUriHost(_reconnectUrl));
+				_logger.Information("EventSub session reconnect requested. New host: {ReconnectHost}", GetSafeUriHost(reconnectUrl));
 
-				_ = Task.Run(async () =>
+				if (reconnectUrl is not { Length: > 0 })
 				{
-					try
-					{
-						await StartInternal(isReconnect: true).ConfigureAwait(false);
-					}
-					catch (Exception ex)
-					{
-						_logger.Warning(ex, "Failed to start new EventSub session during session_reconnect");
-					}
-				});
+					_logger.Warning("EventSub session_reconnect did not include a reconnect URL; reconnecting to the base endpoint");
+					_ = Task.Run(() => RestartInternal());
+					return;
+				}
+
+				_reconnectUrl = reconnectUrl;
+				var reconnectUrlForTask = reconnectUrl;
+				_ = Task.Run(() => ReconnectWithNewProviderAsync(reconnectUrlForTask));
+				_ = Task.Run(() => ScheduleReconnectFallbackAsync());
 			}
 			catch (Exception ex)
 			{
 				_logger.Warning(ex, "Failed to handle session_reconnect");
+			}
+		}
+
+		private async Task ReconnectWithNewProviderAsync(string reconnectUrl)
+		{
+			lock (_reconnectStateLock)
+			{
+				if (_reconnectInProgress)
+				{
+					return;
+				}
+
+				_reconnectInProgress = true;
+				_pendingReconnectIsCommitted = false;
+			}
+
+			try
+			{
+				var candidate = new KittenWebSocketProvider(_logger);
+				candidate.MessageReceived += PendingReconnectMessageReceivedHandler;
+				// The connect URL is the single-use reconnect URL, so the replacement session inherits
+				// the subscriptions of the old connection.
+				_connectedViaReconnectUrl = true;
+				lock (_reconnectStateLock)
+				{
+					_pendingReconnectWebSocketProvider = candidate;
+				}
+
+				_logger.Verbose("Connecting to the replacement EventSub endpoint");
+				await candidate.Connect(reconnectUrl).ConfigureAwait(false);
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to establish a replacement EventSub connection; falling back to the base endpoint");
+				await AbortPendingReconnectAsync().ConfigureAwait(false);
+				await StartInternal(isReconnect: true).ConfigureAwait(false);
+			}
+		}
+
+		private Task PendingReconnectMessageReceivedHandler(WebSocketConnection connection, string message)
+		{
+			if (!TryGetEventSubMessageType(message, out var messageType) || messageType != "session_welcome")
+			{
+				return Task.CompletedTask;
+			}
+
+			_ = Task.Run(async () =>
+			{
+				try
+				{
+					if (await CommitPendingReconnectAsync().ConfigureAwait(false))
+					{
+						MessageReceivedHandlerInternal(connection, message);
+					}
+				}
+				catch (Exception ex)
+				{
+					_logger.Warning(ex, "Failed to commit the replacement EventSub connection; falling back to the base endpoint");
+					await AbortPendingReconnectAsync().ConfigureAwait(false);
+					await StartInternal(isReconnect: true).ConfigureAwait(false);
+				}
+			});
+			return Task.CompletedTask;
+		}
+
+		private async Task<bool> CommitPendingReconnectAsync()
+		{
+			IKittenWebSocketProvider? candidate;
+			IKittenWebSocketProvider? previousProvider;
+			lock (_reconnectStateLock)
+			{
+				candidate = _pendingReconnectWebSocketProvider;
+				if (candidate == null || _pendingReconnectIsCommitted)
+				{
+					return false;
+				}
+
+				_pendingReconnectIsCommitted = true;
+				_pendingReconnectWebSocketProvider = null;
+				previousProvider = _kittenWebSocketProvider;
+				_reconnectInProgress = false;
+			}
+
+			candidate.MessageReceived -= PendingReconnectMessageReceivedHandler;
+			candidate.ConnectHappened += ConnectHappenedHandler;
+			candidate.DisconnectHappened += DisconnectHappenedHandler;
+			candidate.MessageReceived += MessageReceivedHandler;
+			candidate.UpdateAutoReconnectUrl(TWITCH_EVENTSUB_ENDPOINT);
+
+			_kittenWebSocketProvider = candidate;
+			_logger.Information("EventSub reconnect connection established; closing the previous connection");
+
+			if (previousProvider != null)
+			{
+				previousProvider.ConnectHappened -= ConnectHappenedHandler;
+				previousProvider.DisconnectHappened -= DisconnectHappenedHandler;
+				previousProvider.MessageReceived -= MessageReceivedHandler;
+				try
+				{
+					await previousProvider.Disconnect("replaced by an EventSub reconnect connection").ConfigureAwait(false);
+				}
+				catch (Exception ex)
+				{
+					_logger.Verbose(ex, "Failed to close the previous EventSub connection");
+				}
+			}
+
+			return true;
+		}
+
+		private async Task AbortPendingReconnectAsync()
+		{
+			IKittenWebSocketProvider? candidate;
+			lock (_reconnectStateLock)
+			{
+				candidate = _pendingReconnectWebSocketProvider;
+				_pendingReconnectWebSocketProvider = null;
+				_pendingReconnectIsCommitted = false;
+				_reconnectInProgress = false;
+			}
+
+			if (candidate == null)
+			{
+				return;
+			}
+
+			candidate.MessageReceived -= PendingReconnectMessageReceivedHandler;
+			try
+			{
+				await candidate.Disconnect("reconnect attempt aborted").ConfigureAwait(false);
+			}
+			catch (Exception ex)
+			{
+				_logger.Verbose(ex, "Failed to close the aborted EventSub reconnect connection");
+			}
+		}
+
+		private async Task ScheduleReconnectFallbackAsync()
+		{
+			await Task.Delay(TimeSpan.FromSeconds(20)).ConfigureAwait(false);
+
+			bool stillPending;
+			lock (_reconnectStateLock)
+			{
+				stillPending = _pendingReconnectWebSocketProvider != null && !_pendingReconnectIsCommitted;
+			}
+
+			if (!stillPending)
+			{
+				return;
+			}
+
+			_logger.Warning("Replacement EventSub connection did not receive a Welcome message within 20 seconds; falling back to the base endpoint");
+			await AbortPendingReconnectAsync().ConfigureAwait(false);
+			await StartInternal(isReconnect: true).ConfigureAwait(false);
+		}
+
+		private static bool TryGetEventSubMessageType(string rawMessage, out string messageType)
+		{
+			messageType = string.Empty;
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				return jsonDocument.RootElement.TryGetProperty("metadata", out var metadata)
+				       && TryGetString(metadata, "message_type", out messageType);
+			}
+			catch
+			{
+				return false;
+			}
+		}
+
+		private void StartKeepAliveWatchdog()
+		{
+			lock (_keepAliveWatchdogStateLock)
+			{
+				if (_keepAliveWatchdogTask != null)
+				{
+					return;
+				}
+
+				_lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+				_keepAliveWatchdogCancellationTokenSource = new CancellationTokenSource();
+				var cancellationToken = _keepAliveWatchdogCancellationTokenSource.Token;
+				_keepAliveWatchdogTask = Task.Run(() => RunKeepAliveWatchdog(cancellationToken));
+			}
+		}
+
+		private async Task StopKeepAliveWatchdog()
+		{
+			CancellationTokenSource? cancellationTokenSource;
+			Task? watchdogTask;
+			lock (_keepAliveWatchdogStateLock)
+			{
+				cancellationTokenSource = _keepAliveWatchdogCancellationTokenSource;
+				watchdogTask = _keepAliveWatchdogTask;
+				_keepAliveWatchdogCancellationTokenSource = null;
+				_keepAliveWatchdogTask = null;
+			}
+
+			if (cancellationTokenSource == null)
+			{
+				return;
+			}
+
+			cancellationTokenSource.Cancel();
+			try
+			{
+				if (watchdogTask != null)
+				{
+					await watchdogTask.ConfigureAwait(false);
+				}
+			}
+			catch (OperationCanceledException)
+			{
+				// Expected while stopping
+			}
+			finally
+			{
+				cancellationTokenSource.Dispose();
+			}
+		}
+
+		private async Task RunKeepAliveWatchdog(CancellationToken cancellationToken)
+		{
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				try
+				{
+					await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+				}
+				catch (OperationCanceledException)
+				{
+					break;
+				}
+
+				var timeout = TimeSpan.FromSeconds(Math.Max(10, _keepAliveTimeoutSeconds));
+				if (DateTimeOffset.UtcNow - _lastEventSubMessageReceivedAt <= timeout + TimeSpan.FromSeconds(5))
+				{
+					continue;
+				}
+
+				_lastEventSubMessageReceivedAt = DateTimeOffset.UtcNow;
+				_logger.Warning("No EventSub keepalive or notification received within {Timeout}; assuming the connection is lost and reconnecting", timeout);
+
+				// Reconnect from a separate task: RestartInternal stops this watchdog as part of StopInternal,
+				// and awaiting that from the watchdog itself would deadlock.
+				_ = Task.Run(async () =>
+				{
+					try
+					{
+						await Task.Delay(50).ConfigureAwait(false);
+						await RestartInternal().ConfigureAwait(false);
+					}
+					catch (Exception ex)
+					{
+						_logger.Warning(ex, "Failed to reconnect after an EventSub keepalive timeout");
+					}
+				});
 			}
 		}
 
@@ -1271,7 +1547,49 @@ namespace CatCore.Services.Twitch
 				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = subGift.SubTier;
 			}
 
+			if (ev.CommunitySubGift.HasValue)
+			{
+				var communitySubGift = ev.CommunitySubGift.Value;
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = communitySubGift.SubTier;
+				AddLegacyGifterTags(metadata, communitySubGift.GifterIsAnonymous, communitySubGift.GifterUserLogin, communitySubGift.GifterUserName);
+			}
+
+			if (ev.GiftPaidUpgrade.HasValue)
+			{
+				var giftPaidUpgrade = ev.GiftPaidUpgrade.Value;
+				AddLegacyGifterTags(metadata, giftPaidUpgrade.GifterIsAnonymous, giftPaidUpgrade.GifterUserLogin, giftPaidUpgrade.GifterUserName);
+			}
+
+			if (ev.PrimePaidUpgrade.HasValue)
+			{
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(true, ev.PrimePaidUpgrade.Value.SubTier);
+			}
+
+			if (ev.PayItForward.HasValue)
+			{
+				var payItForward = ev.PayItForward.Value;
+				AddLegacyGifterTags(metadata, payItForward.GifterIsAnonymous, payItForward.GifterUserLogin, payItForward.GifterUserName);
+			}
+
 			return new ReadOnlyDictionary<string, string>(metadata);
+		}
+
+		private static void AddLegacyGifterTags(Dictionary<string, string> metadata, bool gifterIsAnonymous, string? gifterUserLogin, string? gifterUserName)
+		{
+			if (gifterIsAnonymous)
+			{
+				return;
+			}
+
+			if (!string.IsNullOrWhiteSpace(gifterUserLogin))
+			{
+				metadata[IrcMessageTags.MSG_PARAM_SENDER_LOGIN] = gifterUserLogin!;
+			}
+
+			if (!string.IsNullOrWhiteSpace(gifterUserName))
+			{
+				metadata[IrcMessageTags.MSG_PARAM_SENDER_NAME] = gifterUserName!;
+			}
 		}
 
 		private static string ResolveSubPlan(bool isPrime, string? subTier)
@@ -1391,13 +1709,48 @@ namespace CatCore.Services.Twitch
 				"raid" => BuildRaidNotificationText(ev),
 				"sub" => $"{GetPreferredDisplayName(ev)} subscribed.",
 				"resub" => BuildResubNotificationText(ev),
-				"gift_sub" => BuildGiftSubNotificationText(ev),
+				"sub_gift" => BuildGiftSubNotificationText(ev),
+				"community_sub_gift" => BuildCommunitySubGiftNotificationText(ev),
+				"gift_paid_upgrade" => $"{GetPreferredDisplayName(ev)} upgraded a gifted subscription.",
+				"prime_paid_upgrade" => $"{GetPreferredDisplayName(ev)} upgraded their Prime subscription.",
 				"pay_it_forward" => $"{GetPreferredDisplayName(ev)} paid a gift forward.",
 				"bits_badge_tier" => BuildBitsBadgeTierNotificationText(ev),
 				"announcement" => GetPreferredDisplayName(ev),
 				"unraid" => $"{GetPreferredDisplayName(ev)} canceled the raid.",
+				"charity_donation" => BuildCharityDonationNotificationText(ev),
+				"watch_streak" => $"{GetPreferredDisplayName(ev)} reached a watch streak of {ev.WatchStreak?.StreakCount ?? 0} streams.",
+				"modiversary" => $"{GetPreferredDisplayName(ev)} has been a moderator for {ev.Modiversary?.Months ?? 0} months.",
+				"gifted_drops_summary" => $"Gifted drops were granted to {ev.GiftedDropsSummary?.RecipientCount ?? 0} users.",
 				_ => string.Empty
 			};
+		}
+
+		private static string BuildCommunitySubGiftNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var gifterName = ev.CommunitySubGift?.GifterUserName;
+			if (string.IsNullOrWhiteSpace(gifterName) || ev.CommunitySubGift?.GifterIsAnonymous == true)
+			{
+				gifterName = "An anonymous gifter";
+			}
+
+			var total = ev.CommunitySubGift?.Total ?? 0;
+			return total > 1
+				? $"{gifterName} gifted {total} subscriptions to the community."
+				: $"{gifterName} gifted a subscription to the community.";
+		}
+
+		private static string BuildCharityDonationNotificationText(EventSubChatNotificationEvent ev)
+		{
+			var charity = ev.CharityDonation;
+			if (!charity.HasValue)
+			{
+				return $"{GetPreferredDisplayName(ev)} made a charity donation.";
+			}
+
+			var amount = charity.Value.Amount;
+			var formattedAmount = string.IsNullOrWhiteSpace(amount.Value) ? string.Empty : $"{amount.Value} {amount.Currency}".Trim();
+			return $"{GetPreferredDisplayName(ev)} donated to {charity.Value.CharityName}".TrimEnd()
+			       + (formattedAmount.Length > 0 ? $" ({formattedAmount})" : string.Empty) + ".";
 		}
 
 		private static string BuildRaidNotificationText(EventSubChatNotificationEvent ev)
@@ -1534,17 +1887,9 @@ namespace CatCore.Services.Twitch
 				var ev = payload.Event;
 
 				// Build IRC-equivalent tags dictionary
-				var tags = new Dictionary<string, string>();
 				// Populate tags for both enabled and disabled states so room state transitions correctly.
-				tags[IrcMessageTags.EMOTE_ONLY] = ev.EmoteMode ? "1" : "0";
-				tags[IrcMessageTags.FOLLOWERS_ONLY] = ev.FollowerMode
-					? (ev.FollowerModeDurationMinutes ?? 0).ToString()
-					: "-1";
-				tags[IrcMessageTags.SUBS_ONLY] = ev.SubscriberMode ? "1" : "0";
-				tags[IrcMessageTags.R9_K] = ev.UniqueChatMode ? "1" : "0";
-				tags[IrcMessageTags.SLOW] = ev.SlowMode
-					? (ev.SlowModeWaitSeconds ?? 0).ToString()
-					: "0";
+				var tags = BuildRoomStateTags(ev.BroadcasterUserId, ev.EmoteMode, ev.FollowerMode, ev.FollowerModeDurationMinutes,
+					ev.SlowMode, ev.SlowModeWaitSeconds, ev.SubscriberMode, ev.UniqueChatMode);
 
 				var roomStateDict = new ReadOnlyDictionary<string, string>(tags);
 				_roomStateTrackerService.UpdateRoomState(ev.BroadcasterUserLogin, roomStateDict);
@@ -1686,6 +2031,7 @@ namespace CatCore.Services.Twitch
 					_logger.Warning("EventSub subscriptions partially created for channel {ChannelId}. Created={CreatedCount}, FailedTypes={FailedTypes}",
 						channelId, subscriptionIds.Count, string.Join(",", failedTypes));
 				}
+				await SeedInitialRoomStateAsync(channelId, channelName).ConfigureAwait(false);
 				InvokeSafely(OnJoinChannel, new TwitchChannel(this, channelId, channelName), nameof(OnJoinChannel));
 			}
 			else if (subscriptionIds.Count == 0)
@@ -1985,6 +2331,82 @@ namespace CatCore.Services.Twitch
 			catch (Exception ex)
 			{
 				_logger.Error(ex, "Consumer handler for {EventName} threw an exception", eventName);
+			}
+		}
+
+		private static Dictionary<string, string> BuildRoomStateTags(string channelId, bool emoteOnly, bool followersOnly, int? followersOnlyDurationMinutes,
+			bool slowMode, int? slowModeWaitSeconds, bool subscribersOnly, bool uniqueChatMode)
+		{
+			return new Dictionary<string, string>(StringComparer.Ordinal)
+			{
+				[IrcMessageTags.ROOM_ID] = channelId,
+				[IrcMessageTags.EMOTE_ONLY] = emoteOnly ? "1" : "0",
+				[IrcMessageTags.FOLLOWERS_ONLY] = followersOnly ? (followersOnlyDurationMinutes ?? 0).ToString() : "-1",
+				[IrcMessageTags.SUBS_ONLY] = subscribersOnly ? "1" : "0",
+				[IrcMessageTags.R9_K] = uniqueChatMode ? "1" : "0",
+				[IrcMessageTags.SLOW] = slowMode ? (slowModeWaitSeconds ?? 0).ToString() : "0"
+			};
+		}
+
+		private void SeedGlobalUserState()
+		{
+			if (_loggedInUser == null)
+			{
+				return;
+			}
+
+			var loggedInUser = _loggedInUser.Value;
+			var tags = new Dictionary<string, string>(StringComparer.Ordinal)
+			{
+				[IrcMessageTags.USER_ID] = loggedInUser.UserId,
+				[IrcMessageTags.DISPLAY_NAME] = loggedInUser.LoginName,
+				[IrcMessageTags.EMOTE_SETS] = "0"
+			};
+
+			_userStateTrackerService.UpdateGlobalUserState(new ReadOnlyDictionary<string, string>(tags));
+		}
+
+		private void SeedUserStateForChannel(string channelId)
+		{
+			if (_loggedInUser == null)
+			{
+				return;
+			}
+
+			var loggedInUser = _loggedInUser.Value;
+			var tags = new Dictionary<string, string>(StringComparer.Ordinal)
+			{
+				[IrcMessageTags.USER_ID] = loggedInUser.UserId,
+				[IrcMessageTags.DISPLAY_NAME] = loggedInUser.LoginName,
+				[IrcMessageTags.EMOTE_SETS] = "0"
+			};
+
+			_userStateTrackerService.UpdateUserState(channelId, new ReadOnlyDictionary<string, string>(tags));
+		}
+
+		private async Task SeedInitialRoomStateAsync(string channelId, string channelName)
+		{
+			try
+			{
+				var chatSettingsResponse = await _twitchHelixApiService.GetChatSettings(channelId).ConfigureAwait(false);
+				if (chatSettingsResponse?.Data is not { Count: > 0 } chatSettingsData)
+				{
+					return;
+				}
+
+				var settings = chatSettingsData[0];
+				var tags = BuildRoomStateTags(channelId, settings.EmoteMode, settings.FollowerMode,
+					settings.FollowerModeDurationMinutes is { } followerDuration ? (int)followerDuration : null,
+					settings.SlowMode, settings.SlowModeWaitTimeSeconds is { } slowWait ? (int)slowWait : null,
+					settings.SubscriberMode, settings.UniqueChatMode);
+
+				_roomStateTrackerService.UpdateRoomState(channelName, new ReadOnlyDictionary<string, string>(tags));
+				SeedUserStateForChannel(channelId);
+				InvokeSafely(OnRoomStateChanged, new TwitchChannel(this, channelId, channelName), nameof(OnRoomStateChanged));
+			}
+			catch (Exception ex)
+			{
+				_logger.Verbose(ex, "Failed to seed initial room state for channel {ChannelId}", channelId);
 			}
 		}
 

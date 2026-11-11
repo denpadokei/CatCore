@@ -78,6 +78,27 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("bits_badge_tier")]
 		public EventSubNotificationBitsBadgeTier? BitsBadgeTier { get; init; }
+
+		[JsonPropertyName("community_sub_gift")]
+		public EventSubNotificationCommunitySubGift? CommunitySubGift { get; init; }
+
+		[JsonPropertyName("gift_paid_upgrade")]
+		public EventSubNotificationGiftPaidUpgrade? GiftPaidUpgrade { get; init; }
+
+		[JsonPropertyName("prime_paid_upgrade")]
+		public EventSubNotificationPrimePaidUpgrade? PrimePaidUpgrade { get; init; }
+
+		[JsonPropertyName("charity_donation")]
+		public EventSubNotificationCharityDonation? CharityDonation { get; init; }
+
+		[JsonPropertyName("watch_streak")]
+		public EventSubNotificationWatchStreak? WatchStreak { get; init; }
+
+		[JsonPropertyName("modiversary")]
+		public EventSubNotificationModiversary? Modiversary { get; init; }
+
+		[JsonPropertyName("gifted_drops_summary")]
+		public EventSubNotificationGiftedDropsSummary? GiftedDropsSummary { get; init; }
 	}
 
 	[PublicAPI]
@@ -204,5 +225,100 @@ namespace CatCore.Models.Twitch.EventSub
 	{
 		[JsonPropertyName("tier")]
 		public int Tier { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationCommunitySubGift
+	{
+		[JsonPropertyName("id")]
+		public string Id { get; init; }
+
+		[JsonPropertyName("total")]
+		public int Total { get; init; }
+
+		[JsonPropertyName("sub_tier")]
+		public string SubTier { get; init; }
+
+		[JsonPropertyName("cumulative_total")]
+		public int? CumulativeTotal { get; init; }
+
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool GifterIsAnonymous { get; init; }
+
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationGiftPaidUpgrade
+	{
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool GifterIsAnonymous { get; init; }
+
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationPrimePaidUpgrade
+	{
+		[JsonPropertyName("sub_tier")]
+		public string SubTier { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationCharityDonation
+	{
+		[JsonPropertyName("charity_name")]
+		public string CharityName { get; init; }
+
+		[JsonPropertyName("amount")]
+		public EventSubNotificationCharityAmount Amount { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationCharityAmount
+	{
+		[JsonPropertyName("value")]
+		public string Value { get; init; }
+
+		[JsonPropertyName("decimal_places")]
+		public int DecimalPlaces { get; init; }
+
+		[JsonPropertyName("currency")]
+		public string Currency { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationWatchStreak
+	{
+		[JsonPropertyName("streak_count")]
+		public int StreakCount { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationModiversary
+	{
+		[JsonPropertyName("months")]
+		public int Months { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationGiftedDropsSummary
+	{
+		[JsonPropertyName("recipient_count")]
+		public int RecipientCount { get; init; }
 	}
 }
