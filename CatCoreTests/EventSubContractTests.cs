@@ -34,7 +34,8 @@ namespace CatCoreTests
 			metadata.MessageType.Should().Be("notification");
 			metadata.SubscriptionType.Should().Be("channel.chat.message");
 			metadata.SubscriptionVersion.Should().Be("1");
-			metadata.MessageTimestamp.Should().BeAfter(new DateTime(2023, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+			// System.Text.Json truncates the 9-digit fractional seconds to 7 digits (100ns ticks).
+			metadata.MessageTimestamp.Should().Be(new DateTime(2023, 7, 19, 14, 56, 51, DateTimeKind.Utc).AddTicks(6_342_346));
 		}
 
 		[Fact]
@@ -46,7 +47,7 @@ namespace CatCoreTests
 					""status"": ""connected"",
 					""keepalive_timeout_seconds"": 10,
 					""reconnect_url"": null,
-					""created_at"": ""2023-07-19T14:56:51.616329898Z""
+					""connected_at"": ""2023-07-19T14:56:51.616329898Z""
 				}
 			}";
 
@@ -56,6 +57,7 @@ namespace CatCoreTests
 			payload.Session.Status.Should().Be("connected");
 			payload.Session.KeepaliveTimeoutSeconds.Should().Be(10);
 			payload.Session.ReconnectUrl.Should().BeNull();
+			payload.Session.ConnectedAt.Should().Be("2023-07-19T14:56:51.616329898Z");
 		}
 
 		[Fact]
@@ -134,13 +136,14 @@ namespace CatCoreTests
 					""notice_type"": ""resub"",
 					""system_message"": ""Viewer23 subscribed at Tier 2."",
 					""message"": { ""text"": """", ""fragments"": [] },
-					""sub"": { ""sub_tier"": ""2000"", ""duration_months"": 1, ""is_gift"": false },
+					""sub"": { ""sub_tier"": ""2000"", ""is_prime"": false, ""duration_months"": 1 },
 					""resub"": {
 						""cumulative_months"": 12,
 						""duration_months"": 1,
 						""streak_months"": null,
 						""sub_tier"": ""2000"",
-						""is_streak"": true
+						""is_prime"": false,
+						""is_gift"": false
 					},
 					""raid"": { ""user_id"": ""777"", ""user_login"": ""raider_login"", ""user_name"": ""Raider_Name"", ""viewer_count"": 42 },
 					""announcement"": { ""color"": ""PRIMARY"" },
@@ -155,6 +158,7 @@ namespace CatCoreTests
 			ev.SystemMessage.Should().Be("Viewer23 subscribed at Tier 2.");
 			ev.Sub.Should().NotBeNull();
 			ev.Sub!.Value.SubTier.Should().Be("2000");
+			ev.Sub!.Value.IsPrime.Should().BeFalse();
 			ev.Resub.Should().NotBeNull();
 			ev.Resub!.Value.CumulativeMonths.Should().Be(12);
 			ev.Resub!.Value.StreakMonths.Should().BeNull();
@@ -217,7 +221,7 @@ namespace CatCoreTests
 					""follower_mode"": true,
 					""follower_mode_duration_minutes"": 30,
 					""slow_mode"": true,
-					""slow_mode_wait_seconds"": 10,
+					""slow_mode_wait_time_seconds"": 10,
 					""subscriber_mode"": false,
 					""unique_chat_mode"": true
 				}
