@@ -57,7 +57,12 @@ namespace CatCore.Services.Twitch
 			RegisterInternalEventHandlers();
 
 			await _twitchIrcService.Start();
-			await _twitchPubSubServiceManager.Start();
+			// TwitchEventSubChatService implements both legacy transport interfaces on a single instance.
+			// Only start the second interface when it actually is a different service instance.
+			if (!ReferenceEquals(_twitchIrcService, _twitchPubSubServiceManager))
+			{
+				await _twitchPubSubServiceManager.Start();
+			}
 		}
 
 		async Task IPlatformService<ITwitchService, TwitchChannel, TwitchMessage>.Stop()
@@ -67,7 +72,10 @@ namespace CatCore.Services.Twitch
 			DeregisterInternalEventHandlers();
 
 			await _twitchIrcService.Stop();
-			await _twitchPubSubServiceManager.Stop();
+			if (!ReferenceEquals(_twitchIrcService, _twitchPubSubServiceManager))
+			{
+				await _twitchPubSubServiceManager.Stop();
+			}
 		}
 
 		/// <inheritdoc />

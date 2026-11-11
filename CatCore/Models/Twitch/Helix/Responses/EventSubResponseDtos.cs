@@ -87,4 +87,55 @@ namespace CatCore.Models.Twitch.Helix.Responses
 		[JsonPropertyName("cost")]
 		public int Cost { get; }
 	}
+
+	[PublicAPI]
+	internal readonly struct SendChatMessageResponseDto
+	{
+		[JsonConstructor]
+		public SendChatMessageResponseDto(List<SendChatMessageResultDto> data)
+		{
+			Data = data ?? new List<SendChatMessageResultDto>();
+		}
+
+		[JsonPropertyName("data")]
+		public List<SendChatMessageResultDto> Data { get; }
+	}
+
+	[PublicAPI]
+	internal readonly struct SendChatMessageResultDto
+	{
+		[JsonConstructor]
+		public SendChatMessageResultDto(string messageId, bool isSent, SendChatMessageDropReasonDto? dropReason)
+		{
+			MessageId = messageId;
+			IsSent = isSent;
+			DropReason = dropReason;
+		}
+
+		[JsonPropertyName("message_id")]
+		public string MessageId { get; }
+
+		[JsonPropertyName("is_sent")]
+		public bool IsSent { get; }
+
+		[JsonPropertyName("drop_reason")]
+		public SendChatMessageDropReasonDto? DropReason { get; }
+	}
+
+	[PublicAPI]
+	internal readonly struct SendChatMessageDropReasonDto
+	{
+		[JsonConstructor]
+		public SendChatMessageDropReasonDto(string code, string message)
+		{
+			Code = code;
+			Message = message;
+		}
+
+		[JsonPropertyName("code")]
+		public string Code { get; }
+
+		[JsonPropertyName("message")]
+		public string Message { get; }
+	}
 }

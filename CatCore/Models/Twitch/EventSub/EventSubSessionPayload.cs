@@ -19,12 +19,12 @@ namespace CatCore.Models.Twitch.EventSub
 		public string Status { get; init; }
 
 		[JsonPropertyName("keepalive_timeout_seconds")]
-		public int KeepaliveTimeoutSeconds { get; init; }
+		public int? KeepaliveTimeoutSeconds { get; init; }
 
 		[JsonPropertyName("reconnect_url")]
 		public string? ReconnectUrl { get; init; }
 
-		[JsonPropertyName("created_at")]
-		public string CreatedAt { get; init; }
+		[JsonPropertyName("connected_at")]
+		public string ConnectedAt { get; init; }
 	}
 }

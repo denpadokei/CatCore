@@ -34,6 +34,18 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("chatter_user_name")]
 		public string ChatterUserName { get; init; }
 
+		[JsonPropertyName("chatter_is_anonymous")]
+		public bool ChatterIsAnonymous { get; init; }
+
+		[JsonPropertyName("color")]
+		public string Color { get; init; }
+
+		[JsonPropertyName("badges")]
+		public List<EventSubBadge>? Badges { get; init; }
+
+		[JsonPropertyName("message_id")]
+		public string MessageId { get; init; }
+
 		[JsonPropertyName("notice_type")]
 		public string NoticeType { get; init; }
 
@@ -49,8 +61,8 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("resub")]
 		public EventSubNotificationResub? Resub { get; init; }
 
-		[JsonPropertyName("gift_sub")]
-		public EventSubNotificationGiftSub? GiftSub { get; init; }
+		[JsonPropertyName("sub_gift")]
+		public EventSubNotificationGiftSub? SubGift { get; init; }
 
 		[JsonPropertyName("raid")]
 		public EventSubNotificationRaid? Raid { get; init; }
@@ -66,13 +78,87 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("bits_badge_tier")]
 		public EventSubNotificationBitsBadgeTier? BitsBadgeTier { get; init; }
+
+		[JsonPropertyName("community_sub_gift")]
+		public EventSubNotificationCommunitySubGift? CommunitySubGift { get; init; }
+
+		[JsonPropertyName("gift_paid_upgrade")]
+		public EventSubNotificationGiftPaidUpgrade? GiftPaidUpgrade { get; init; }
+
+		[JsonPropertyName("prime_paid_upgrade")]
+		public EventSubNotificationPrimePaidUpgrade? PrimePaidUpgrade { get; init; }
+
+		[JsonPropertyName("charity_donation")]
+		public EventSubNotificationCharityDonation? CharityDonation { get; init; }
+
+		[JsonPropertyName("watch_streak")]
+		public EventSubNotificationWatchStreak? WatchStreak { get; init; }
+
+		[JsonPropertyName("modiversary")]
+		public EventSubNotificationModiversary? Modiversary { get; init; }
+
+		[JsonPropertyName("gifted_drops_summary")]
+		public EventSubNotificationGiftedDropsSummary? GiftedDropsSummary { get; init; }
+
+		// Shared chat: the event carries the source channel/message it originated from.
+		[JsonPropertyName("source_broadcaster_user_id")]
+		public string? SourceBroadcasterUserId { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_login")]
+		public string? SourceBroadcasterUserLogin { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_name")]
+		public string? SourceBroadcasterUserName { get; init; }
+
+		[JsonPropertyName("source_message_id")]
+		public string? SourceMessageId { get; init; }
+
+		[JsonPropertyName("source_badges")]
+		public List<EventSubBadge>? SourceBadges { get; init; }
+
+		[JsonPropertyName("is_source_only")]
+		public bool? IsSourceOnly { get; init; }
+
+		// Shared-chat notice objects. These have the same shape as their non-shared counterparts.
+		[JsonPropertyName("shared_chat_sub")]
+		public EventSubNotificationSub? SharedChatSub { get; init; }
+
+		[JsonPropertyName("shared_chat_resub")]
+		public EventSubNotificationResub? SharedChatResub { get; init; }
+
+		[JsonPropertyName("shared_chat_sub_gift")]
+		public EventSubNotificationGiftSub? SharedChatSubGift { get; init; }
+
+		[JsonPropertyName("shared_chat_community_sub_gift")]
+		public EventSubNotificationCommunitySubGift? SharedChatCommunitySubGift { get; init; }
+
+		[JsonPropertyName("shared_chat_gift_paid_upgrade")]
+		public EventSubNotificationGiftPaidUpgrade? SharedChatGiftPaidUpgrade { get; init; }
+
+		[JsonPropertyName("shared_chat_prime_paid_upgrade")]
+		public EventSubNotificationPrimePaidUpgrade? SharedChatPrimePaidUpgrade { get; init; }
+
+		[JsonPropertyName("shared_chat_pay_it_forward")]
+		public EventSubNotificationPayItForward? SharedChatPayItForward { get; init; }
+
+		[JsonPropertyName("shared_chat_raid")]
+		public EventSubNotificationRaid? SharedChatRaid { get; init; }
+
+		[JsonPropertyName("shared_chat_announcement")]
+		public EventSubNotificationAnnouncement? SharedChatAnnouncement { get; init; }
+
+		[JsonPropertyName("shared_chat_modiversary")]
+		public EventSubNotificationModiversary? SharedChatModiversary { get; init; }
+
+		[JsonPropertyName("shared_chat_gifted_drops_summary")]
+		public EventSubNotificationGiftedDropsSummary? SharedChatGiftedDropsSummary { get; init; }
 	}
 
 	[PublicAPI]
 	public struct EventSubNotificationSub
 	{
-		[JsonPropertyName("is_gift")]
-		public bool IsGift { get; init; }
+		[JsonPropertyName("is_prime")]
+		public bool IsPrime { get; init; }
 
 		[JsonPropertyName("sub_tier")]
 		public string SubTier { get; init; }
@@ -93,11 +179,26 @@ namespace CatCore.Models.Twitch.EventSub
 		[JsonPropertyName("streak_months")]
 		public int? StreakMonths { get; init; }
 
-		[JsonPropertyName("is_streak")]
-		public bool IsStreak { get; init; }
-
 		[JsonPropertyName("sub_tier")]
 		public string SubTier { get; init; }
+
+		[JsonPropertyName("is_prime")]
+		public bool? IsPrime { get; init; }
+
+		[JsonPropertyName("is_gift")]
+		public bool IsGift { get; init; }
+
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool? GifterIsAnonymous { get; init; }
+
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
 	}
 
 	[PublicAPI]
@@ -123,9 +224,6 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("sub_tier")]
 		public string SubTier { get; init; }
-
-		[JsonPropertyName("community_gift_ids")]
-		public List<string>? CommunityGiftIds { get; init; }
 	}
 
 	[PublicAPI]
@@ -142,6 +240,9 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("viewer_count")]
 		public int ViewerCount { get; init; }
+
+		[JsonPropertyName("profile_image_url")]
+		public string? ProfileImageUrl { get; init; }
 	}
 
 	[PublicAPI]
@@ -152,11 +253,17 @@ namespace CatCore.Models.Twitch.EventSub
 	[PublicAPI]
 	public struct EventSubNotificationPayItForward
 	{
-		[JsonPropertyName("is_anonymous")]
-		public bool IsAnonymous { get; init; }
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool GifterIsAnonymous { get; init; }
 
-		[JsonPropertyName("community_gift_id")]
-		public string? CommunityGiftId { get; init; }
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
 	}
 
 	[PublicAPI]
@@ -171,5 +278,91 @@ namespace CatCore.Models.Twitch.EventSub
 	{
 		[JsonPropertyName("tier")]
 		public int Tier { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationCommunitySubGift
+	{
+		[JsonPropertyName("id")]
+		public string Id { get; init; }
+
+		[JsonPropertyName("total")]
+		public int Total { get; init; }
+
+		[JsonPropertyName("sub_tier")]
+		public string SubTier { get; init; }
+
+		[JsonPropertyName("cumulative_total")]
+		public int? CumulativeTotal { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationGiftPaidUpgrade
+	{
+		[JsonPropertyName("gifter_is_anonymous")]
+		public bool GifterIsAnonymous { get; init; }
+
+		[JsonPropertyName("gifter_user_id")]
+		public string? GifterUserId { get; init; }
+
+		[JsonPropertyName("gifter_user_name")]
+		public string? GifterUserName { get; init; }
+
+		[JsonPropertyName("gifter_user_login")]
+		public string? GifterUserLogin { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationPrimePaidUpgrade
+	{
+		[JsonPropertyName("sub_tier")]
+		public string SubTier { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationCharityDonation
+	{
+		[JsonPropertyName("charity_name")]
+		public string CharityName { get; init; }
+
+		[JsonPropertyName("amount")]
+		public EventSubNotificationCharityAmount Amount { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationCharityAmount
+	{
+		[JsonPropertyName("value")]
+		public int Value { get; init; }
+
+		[JsonPropertyName("decimal_places")]
+		public int DecimalPlaces { get; init; }
+
+		[JsonPropertyName("currency")]
+		public string Currency { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationWatchStreak
+	{
+		[JsonPropertyName("streak_count")]
+		public int StreakCount { get; init; }
+
+		[JsonPropertyName("channel_points_awarded")]
+		public int ChannelPointsAwarded { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationModiversary
+	{
+		[JsonPropertyName("months")]
+		public int Months { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubNotificationGiftedDropsSummary
+	{
+		[JsonPropertyName("recipient_count")]
+		public int RecipientCount { get; init; }
 	}
 }

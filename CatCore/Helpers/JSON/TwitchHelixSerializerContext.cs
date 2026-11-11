@@ -38,6 +38,7 @@ namespace CatCore.Helpers.JSON
 	[JsonSerializable(typeof(HelixRequests.EventSubTransportDto))]
 	[JsonSerializable(typeof(HelixResponses.EventSubSubscriptionResponseDto))]
 	[JsonSerializable(typeof(HelixResponses.EventSubSubscriptionInfoDto))]
+	[JsonSerializable(typeof(HelixResponses.SendChatMessageResponseDto))]
 	internal partial class TwitchHelixSerializerContext : JsonSerializerContext
 	{
 	}

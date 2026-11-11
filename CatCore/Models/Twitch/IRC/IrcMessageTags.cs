@@ -1,4 +1,4 @@
-﻿namespace CatCore.Models.Twitch.IRC
+namespace CatCore.Models.Twitch.IRC
 {
 	/// <summary>
 	/// All IRC message tag keys that are publicly described by Twitch documentation
@@ -55,6 +55,23 @@
 		public const string MSG_PARAM_SUB_PLAN_NAME = "msg-param-sub-plan-name";
 		public const string MSG_PARAM_VIEWER_COUNT = "msg-param-viewerCount";
 		public const string MSG_PARAM_PROFILE_IMAGE_URL = "msg-param-profileImageURL";
+		/// <summary>Original message id of a message that came from another channel of a shared chat.</summary>
+		public const string SOURCE_ID = "source-id";
+
+		/// <summary>Room id of the source channel of a shared-chat message.</summary>
+		public const string SOURCE_ROOM_ID = "source-room-id";
+
+		/// <summary>Whether a shared-chat message was only sent to the source channel.</summary>
+		public const string SOURCE_ONLY = "source-only";
+
+		/// <summary>Badges of the author in the source channel of a shared-chat message.</summary>
+		public const string SOURCE_BADGES = "source-badges";
+
+		/// <summary>Badge metadata (set id / info) for <see cref="SOURCE_BADGES"/>.</summary>
+		public const string SOURCE_BADGE_INFO = "source-badge-info";
+
+		/// <summary>Original USERNOTICE msg-id when the notice came from another channel of a shared chat.</summary>
+		public const string SOURCE_MSG_ID = "source-msg-id";
 		public const string MSG_PARAM_RITUAL_NAME = "msg-param-ritual-name";
 		public const string MSG_PARAM_THRESHOLD = "msg-param-threshold";
 		public const string MSG_PARAM_GIFT_MONTHS = "msg-param-gift-months";

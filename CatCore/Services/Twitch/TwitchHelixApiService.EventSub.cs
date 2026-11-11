@@ -15,6 +15,8 @@ namespace CatCore.Services.Twitch
 {
 	public sealed partial class TwitchHelixApiService
 	{
+		private const int TWITCH_CHAT_MESSAGE_CHARACTER_LIMIT = 500;
+
 		/// <summary>
 		/// Sends a chat message to a broadcaster's chat.
 		/// </summary>
@@ -22,17 +24,14 @@ namespace CatCore.Services.Twitch
 		/// <param name="senderUserId">The ID of the user sending the message</param>
 		/// <param name="message">The message text. Max length is 500 characters</param>
 		/// <param name="cancellationToken">CancellationToken that can be used to cancel the call</param>
-		/// <returns>True if the message was sent successfully, false otherwise</returns>
+		/// <returns>True if Twitch accepted and sent the message, false otherwise</returns>
 		/// <exception cref="TwitchNotAuthenticatedException">Gets thrown when the user isn't authenticated</exception>
+		/// <remarks>Messages dropped by Twitch (AutoMod hold, slow/sub-only mode, duplicate, timeouts, ...) return false and are logged together with the drop reason.</remarks>
 		internal async Task<bool> SendChatMessage(string broadcasterId, string senderUserId, string message, CancellationToken cancellationToken = default)
 		{
 			await CheckUserLoggedIn().ConfigureAwait(false);
 
-			if (message.Length > 500)
-			{
-				_logger.Warning("Message length exceeds 500 characters. Trimming to 500");
-				message = message.Substring(0, 500);
-			}
+			message = TruncateToCharacterLimit(message, TWITCH_CHAT_MESSAGE_CHARACTER_LIMIT);
 
 			var requestDto = new SendChatMessageRequestDto
 			{
@@ -41,11 +40,11 @@ namespace CatCore.Services.Twitch
 				Message = message
 			};
 
-			var url = $"chat/messages";
+			const string url = "chat/messages";
 			try
 			{
 				var jsonContent = JsonSerializer.Serialize(requestDto, TwitchHelixSerializerContext.Default.SendChatMessageRequestDto);
-				using var response = await _combinedHelixPolicy.ExecuteAsync(async ct =>
+				using var response = await _combinedHelixWritePolicy.ExecuteAsync(async ct =>
 				{
 					using var httpRequestMessage = new HttpRequestMessage(HttpMethod.Post, url)
 					{
@@ -54,7 +53,40 @@ namespace CatCore.Services.Twitch
 					return await _helixClient.SendAsync(httpRequestMessage, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
 				}, cancellationToken).ConfigureAwait(false);
 
-				return response?.IsSuccessStatusCode ?? false;
+				if (response == null)
+				{
+					_logger.Warning("Failed to send chat message: received null HTTP response");
+					return false;
+				}
+
+				if (!response.IsSuccessStatusCode)
+				{
+					var errorContent = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+					_logger.Warning("Failed to send chat message. StatusCode={StatusCode}, Response={Response}", response.StatusCode, errorContent);
+					return false;
+				}
+
+				var responseJson = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+				var sendMessageResponse = JsonSerializer.Deserialize(responseJson, TwitchHelixSerializerContext.Default.SendChatMessageResponseDto);
+				if (sendMessageResponse.Data == null || sendMessageResponse.Data.Count == 0)
+				{
+					_logger.Warning("Chat message response did not include data. Payload={Payload}", responseJson);
+					return false;
+				}
+
+				var result = sendMessageResponse.Data[0];
+				if (!result.IsSent)
+				{
+					_logger.Warning("Chat message was dropped by Twitch. DropReasonCode={DropReasonCode}, DropReasonMessage={DropReasonMessage}",
+						result.DropReason?.Code ?? "<none>", result.DropReason?.Message ?? "<none>");
+					return false;
+				}
+
+				return true;
+			}
+			catch (OperationCanceledException)
+			{
+				throw;
 			}
 			catch (Exception ex)
 			{
@@ -105,7 +137,7 @@ namespace CatCore.Services.Twitch
 
 			try
 			{
-				using var httpResponseMessage = await _combinedHelixPolicy.ExecuteAsync(async ct =>
+				using var httpResponseMessage = await _combinedHelixWritePolicy.ExecuteAsync(async ct =>
 				{
 					var jsonContent = JsonSerializer.Serialize(requestDto, TwitchHelixSerializerContext.Default.EventSubSubscriptionRequestDto);
 					var content = new StringContent(jsonContent, System.Text.Encoding.UTF8, "application/json");
@@ -206,6 +238,34 @@ namespace CatCore.Services.Twitch
 				_logger.Warning(ex, "Failed to delete EventSub subscription {SubscriptionId}", subscriptionId);
 				return false;
 			}
+		}
+
+		/// <summary>
+		/// Truncates a chat message to Twitch's character limit without splitting a surrogate pair
+		/// (and therefore without emitting an invalid lone surrogate).
+		/// </summary>
+		private string TruncateToCharacterLimit(string message, int maxCharacterCount)
+		{
+			if (string.IsNullOrEmpty(message) || maxCharacterCount <= 0)
+			{
+				return message;
+			}
+
+			var characterCount = 0;
+			var index = 0;
+			while (index < message.Length && characterCount < maxCharacterCount)
+			{
+				index += char.IsHighSurrogate(message[index]) && index + 1 < message.Length && char.IsLowSurrogate(message[index + 1]) ? 2 : 1;
+				characterCount++;
+			}
+
+			if (index >= message.Length)
+			{
+				return message;
+			}
+
+			_logger.Warning("Message length exceeds {MaxCharacterCount} characters. Trimming", maxCharacterCount);
+			return message.Substring(0, index);
 		}
 	}
 }

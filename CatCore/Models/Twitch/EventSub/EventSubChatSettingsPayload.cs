@@ -29,13 +29,13 @@ namespace CatCore.Models.Twitch.EventSub
 		public bool FollowerMode { get; init; }
 
 		[JsonPropertyName("follower_mode_duration_minutes")]
-		public int FollowerModeDurationMinutes { get; init; }
+		public int? FollowerModeDurationMinutes { get; init; }
 
 		[JsonPropertyName("slow_mode")]
 		public bool SlowMode { get; init; }
 
-		[JsonPropertyName("slow_mode_wait_seconds")]
-		public int SlowModeWaitSeconds { get; init; }
+		[JsonPropertyName("slow_mode_wait_time_seconds")]
+		public int? SlowModeWaitSeconds { get; init; }
 
 		[JsonPropertyName("subscriber_mode")]
 		public bool SubscriberMode { get; init; }

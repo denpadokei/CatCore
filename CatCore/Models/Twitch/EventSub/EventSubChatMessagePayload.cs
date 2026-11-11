@@ -85,6 +85,24 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("channel_points_custom_reward_id")]
 		public string? ChannelPointsCustomRewardId { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_id")]
+		public string? SourceBroadcasterUserId { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_login")]
+		public string? SourceBroadcasterUserLogin { get; init; }
+
+		[JsonPropertyName("source_broadcaster_user_name")]
+		public string? SourceBroadcasterUserName { get; init; }
+
+		[JsonPropertyName("source_message_id")]
+		public string? SourceMessageId { get; init; }
+
+		[JsonPropertyName("source_badges")]
+		public List<EventSubBadge>? SourceBadges { get; init; }
+
+		[JsonPropertyName("is_source_only")]
+		public bool? IsSourceOnly { get; init; }
 	}
 
 	[PublicAPI]
@@ -114,6 +132,9 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("mention")]
 		public EventSubMentionFragment? Mention { get; init; }
+
+		[JsonPropertyName("gif")]
+		public EventSubGifFragment? Gif { get; init; }
 	}
 
 	[PublicAPI]
@@ -135,11 +156,24 @@ namespace CatCore.Models.Twitch.EventSub
 	[PublicAPI]
 	public struct EventSubCheermoteFragment
 	{
+		[JsonPropertyName("prefix")]
+		public string Prefix { get; init; }
+
 		[JsonPropertyName("bits")]
 		public int Bits { get; init; }
 
 		[JsonPropertyName("tier")]
 		public int Tier { get; init; }
+	}
+
+	[PublicAPI]
+	public struct EventSubGifFragment
+	{
+		[JsonPropertyName("id")]
+		public string Id { get; init; }
+
+		[JsonPropertyName("url")]
+		public string Url { get; init; }
 	}
 
 	[PublicAPI]
@@ -192,5 +226,17 @@ namespace CatCore.Models.Twitch.EventSub
 
 		[JsonPropertyName("parent_user_name")]
 		public string ParentUserName { get; init; }
+
+		[JsonPropertyName("thread_message_id")]
+		public string ThreadMessageId { get; init; }
+
+		[JsonPropertyName("thread_user_id")]
+		public string ThreadUserId { get; init; }
+
+		[JsonPropertyName("thread_user_login")]
+		public string ThreadUserLogin { get; init; }
+
+		[JsonPropertyName("thread_user_name")]
+		public string ThreadUserName { get; init; }
 	}
 }

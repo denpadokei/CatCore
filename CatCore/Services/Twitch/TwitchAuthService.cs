@@ -26,6 +26,7 @@ namespace CatCore.Services.Twitch
 		private static readonly TimeSpan VALIDATION_INTERVAL = TimeSpan.FromHours(1);
 		private static readonly TimeSpan FORCED_REFRESH_OFFSET = TimeSpan.FromMinutes(4);
 		private static readonly TimeSpan FAILED_REFRESH_RETRY_DELAY = TimeSpan.FromMinutes(1);
+		private const int FAILED_REFRESH_RETRY_MAX_MINUTES = 60;
 
 		private readonly AsyncRetryPolicy<HttpResponseMessage> _exceptionRetryPolicy;
 
@@ -48,11 +49,13 @@ namespace CatCore.Services.Twitch
 			"channel:manage:redemptions",
 			"channel:moderate",
 			"channel:read:ads",
+			"channel:read:chat_settings",
 			"channel:read:subscriptions",
 			"moderator:manage:announcements",
 			"moderator:manage:banned_users",
 			"moderator:manage:chat_messages",
 			"moderator:manage:chat_settings",
+			"moderator:read:chat_settings",
 			"moderator:read:followers",
 			"user:manage:chat_color",
 			"user:read:follows"
@@ -72,6 +75,8 @@ namespace CatCore.Services.Twitch
 		private CancellationTokenSource? _forcedRefreshCancellationTokenSource;
 		private Task? _forcedRefreshTask;
 		private bool _isInitialized;
+		private bool _scopeMismatchDetected;
+		private int _consecutiveForcedRefreshFailures;
 
 		protected override string ServiceType => SERVICE_TYPE;
 
@@ -272,7 +277,14 @@ namespace CatCore.Services.Twitch
 				_logger.Information("Running scheduled Twitch token refresh");
 				if (!await RefreshTokens().ConfigureAwait(false) && !cancellationToken.IsCancellationRequested)
 				{
-					ScheduleForcedRefresh(FAILED_REFRESH_RETRY_DELAY);
+					_consecutiveForcedRefreshFailures++;
+					var retryDelay = TimeSpan.FromMinutes(Math.Min(FAILED_REFRESH_RETRY_MAX_MINUTES, Math.Pow(2, Math.Min(_consecutiveForcedRefreshFailures, 6))));
+					_logger.Warning("Scheduled Twitch token refresh failed. Retrying in {Delay} (attempt {Attempt})", retryDelay.ToString("g"), _consecutiveForcedRefreshFailures);
+					ScheduleForcedRefresh(retryDelay);
+				}
+				else
+				{
+					_consecutiveForcedRefreshFailures = 0;
 				}
 			}
 			catch (OperationCanceledException)
@@ -286,6 +298,12 @@ namespace CatCore.Services.Twitch
 		{
 			if (HasTokens)
 			{
+				if (_scopeMismatchDetected)
+				{
+					_logger.Verbose("Twitch token is missing required authorization scopes; skipping validation until the user re-authorizes");
+					return null;
+				}
+
 				if (TokenIsValid && _loggedInUser != null)
 				{
 					return _loggedInUser;
@@ -313,7 +331,7 @@ namespace CatCore.Services.Twitch
 					if (validateAccessToken == null || !TokenIsValid)
 					{
 						_logger.Information("Refreshing tokens");
-						await RefreshTokens().ConfigureAwait(false);
+						await RefreshTokens(force: true).ConfigureAwait(false);
 					}
 
 					return _loggedInUser;
@@ -357,13 +375,7 @@ namespace CatCore.Services.Twitch
 					return;
 				}
 
-#if DEBUG
-				var contentString = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
-				_logger.Debug("Twitch authorization response payload: {Payload}", contentString);
-				var authorizationResponse = JsonSerializer.Deserialize(contentString, TwitchAuthSerializerContext.Default.AuthorizationResponse);
-#else
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
-#endif
 
 				var newCredentials = new TwitchCredentials(authorizationResponse);
 				await ValidateAccessToken(newCredentials).ConfigureAwait(false);
@@ -379,6 +391,14 @@ namespace CatCore.Services.Twitch
 		}
 
 		public async Task<ValidationResponse?> ValidateAccessToken(TwitchCredentials credentials, bool resetDataOnFailure = true)
+		{
+			// Serialize the validation result with token rotation so a validation that started before a
+			// refresh cannot overwrite the freshly rotated credentials.
+			using var _ = await Synchronization.LockAsync(_refreshLocker).ConfigureAwait(false);
+			return await ValidateAccessTokenCore(credentials, resetDataOnFailure).ConfigureAwait(false);
+		}
+
+		private async Task<ValidationResponse?> ValidateAccessTokenCore(TwitchCredentials credentials, bool resetDataOnFailure = true)
 		{
 			if (string.IsNullOrWhiteSpace(credentials.AccessToken))
 			{
@@ -426,18 +446,26 @@ namespace CatCore.Services.Twitch
 			var missingScopes = _twitchAuthorizationScope.Where(requiredScope => !validationResponse.Scopes.Contains(requiredScope)).ToArray();
 			if (missingScopes.Length > 0)
 			{
-				if (resetDataOnFailure)
-				{
-					UpdateCredentials(TwitchCredentials.Empty());
-					_loggedInUser = null;
-					CancelForcedRefresh();
-				}
+				// Do not discard the stored credentials on a scope mismatch. The refresh token is still
+				// valid and can be used to recover, and wiping it makes post-upgrade diagnosis impossible.
+				// Consumers observe AuthenticationStatus.Unauthorized and the portal can prompt for
+				// re-authorization; validation is short-circuited until new credentials are provided.
+				_scopeMismatchDetected = true;
+				CancelForcedRefresh();
 
 				Status = AuthenticationStatus.Unauthorized;
 				_logger.Warning("Twitch token is missing required authorization scopes. Missing={MissingScopes}; Current={CurrentScopes}",
 					string.Join(",", missingScopes),
 					string.Join(",", validationResponse.Scopes));
 				return null;
+			}
+
+			_scopeMismatchDetected = false;
+
+			if (!string.Equals(Credentials.AccessToken, credentials.AccessToken, StringComparison.Ordinal))
+			{
+				_logger.Verbose("Ignoring a stale token validation result because the current credentials changed while validating");
+				return _loggedInUser;
 			}
 
 			_loggedInUser = validationResponse;
@@ -452,7 +480,7 @@ namespace CatCore.Services.Twitch
 			return _loggedInUser;
 		}
 
-		public async Task<bool> RefreshTokens()
+		public async Task<bool> RefreshTokens(bool force = false)
 		{
 			using var _ = await Synchronization.LockAsync(_refreshLocker);
 			if (string.IsNullOrWhiteSpace(Credentials.RefreshToken))
@@ -460,7 +488,7 @@ namespace CatCore.Services.Twitch
 				return false;
 			}
 
-			if (TokenIsValid)
+			if (!force && TokenIsValid)
 			{
 				return true;
 			}
@@ -475,14 +503,17 @@ namespace CatCore.Services.Twitch
 
 				if (!responseMessage.IsSuccessStatusCode)
 				{
-					_logger.Warning("Refreshing tokens resulted in non-success status code");
+					_logger.Warning("Refreshing tokens resulted in non-success status code: {StatusCode}", responseMessage.StatusCode);
 					return false;
 				}
 
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
 
 				var refreshedCredentials = new TwitchCredentials(authorizationResponse);
-				return await ValidateAccessToken(refreshedCredentials).ConfigureAwait(false) != null;
+				// Persist the rotated token pair immediately. Twitch may invalidate the previous refresh token
+				// as soon as it issues a new one, so losing the new pair would permanently log the user out.
+				UpdateCredentials(refreshedCredentials);
+				return await ValidateAccessTokenCore(refreshedCredentials).ConfigureAwait(false) != null;
 			}
 			catch (HttpRequestException ex)
 			{
@@ -521,6 +552,7 @@ namespace CatCore.Services.Twitch
 
 				UpdateCredentials(TwitchCredentials.Empty());
 				_loggedInUser = null;
+				_scopeMismatchDetected = false;
 				CancelForcedRefresh();
 
 				return responseMessage.IsSuccessStatusCode;

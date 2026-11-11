@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Net.Sockets;
 using System.Reactive.Linq;
@@ -23,6 +23,7 @@ namespace CatCore.Services
 
 		private TcpClient? _underlyingTcpClient;
 		private MessageWebsocketRx? _websocketClient;
+		private string? _autoReconnectUrl;
 
 		private IDisposable? _disposableWebsocketSubscription;
 		private Subject<(IDataframe? dataframe, ConnectionStatus state)>? _websocketConnectionSubject;
@@ -47,6 +48,7 @@ namespace CatCore.Services
 			await Disconnect().ConfigureAwait(false);
 
 			using var _ = await Synchronization.LockAsync(_connectionLocker).ConfigureAwait(false);
+			Volatile.Write(ref _autoReconnectUrl, url);
 			var targetUri = new Uri(url);
 			_underlyingTcpClient = CreateTcpClient(targetUri);
 			_websocketClient = new MessageWebsocketRx(_underlyingTcpClient, hasTransferTcpSocketLifeCycleOwnership: true)
@@ -63,19 +65,22 @@ namespace CatCore.Services
 				.ObserveOn(System.Reactive.Concurrency.ThreadPoolScheduler.Instance)
 				.Catch<(IDataframe? dataframe, ConnectionStatus state), WebsocketClientLiteTcpConnectException>(ex =>
 				{
-					_logger.Error(ex, "A tcp connect exception occurred. Marking connection as failed");
+					// Do not log the exception object: WebsocketClientLite may embed the full URI (including
+					// path/query authorization material) in the message or stack trace.
+					_logger.Error("A tcp connect exception occurred ({ExceptionType}) for endpoint host {Host}. Marking connection as failed", ex.GetType().Name, LogRedaction.GetUriHost(url));
 					return Observable.Return<(IDataframe? dataframe, ConnectionStatus state)>((null, ConnectionStatus.ConnectionFailed));
 				})
 				.Catch<(IDataframe? dataframe, ConnectionStatus state), WebsocketClientLiteException>(ex =>
 				{
-					_logger.Error(ex, "A websocket error occurred. Marking connection as failed");
+					// See above: the exception message may contain the session/reconnect URL.
+					_logger.Error("A websocket error occurred ({ExceptionType}) for endpoint host {Host}. Marking connection as failed", ex.GetType().Name, LogRedaction.GetUriHost(url));
 					return Observable.Return<(IDataframe? dataframe, ConnectionStatus state)>((null, ConnectionStatus.ConnectionFailed));
 				});
 			_websocketConnectionSubject = new Subject<(IDataframe? dataframe, ConnectionStatus state)>();
 
 			_connectObservable = _websocketConnectionSubject
 				.Where(tuple => tuple.state == ConnectionStatus.WebsocketConnected)
-				.Do(_ => _logger.Debug("Connected to url: {Url}", url))
+				.Do(_ => _logger.Debug("Connected to endpoint host: {Host}", LogRedaction.GetUriHost(url)))
 				.Select(_ => Observable.FromAsync(async () => await ConnectHandler(wrapper)))
 				.Concat()
 				.Subscribe();
@@ -94,8 +99,8 @@ namespace CatCore.Services
 					or ConnectionStatus.Aborted
 					or ConnectionStatus.ConnectionFailed
 					or ConnectionStatus.Close)
-				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for url: {Url}", tuple.state, url))
-				.Select(_ => Observable.FromAsync(() => Connect(url)))
+				.Do(tuple => _logger.Debug("A disconnect occured ({State}) for endpoint host: {Host}", tuple.state, LogRedaction.GetUriHost(url)))
+				.Select(_ => Observable.FromAsync(() => Connect(Volatile.Read(ref _autoReconnectUrl) ?? url)))
 				.Concat()
 				.Subscribe();
 			_messageReceivedObservable = _websocketConnectionSubject
@@ -104,9 +109,14 @@ namespace CatCore.Services
 				.Concat()
 				.Subscribe();
 
-			websocketConnectionObservable.Subscribe(_websocketConnectionSubject);
+			_disposableWebsocketSubscription = websocketConnectionObservable.Subscribe(_websocketConnectionSubject);
 
 			await tcs.Task;
+		}
+
+		public void UpdateAutoReconnectUrl(string url)
+		{
+			Volatile.Write(ref _autoReconnectUrl, url);
 		}
 
 		public async Task Disconnect(string? reason = null)
@@ -136,6 +146,7 @@ namespace CatCore.Services
 			_messageReceivedObservable?.Dispose();
 			_messageReceivedObservable = null;
 
+			_underlyingTcpClient?.Dispose();
 			_underlyingTcpClient = null;
 
 			_websocketClient = null;
