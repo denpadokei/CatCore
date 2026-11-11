@@ -1432,7 +1432,7 @@ namespace CatCore.Services.Twitch
 					user,
 					channel,
 					emotes.AsReadOnly(),
-					BuildSourceBroadcasterMetadata(ev.SourceBroadcasterUserId, ev.SourceBroadcasterUserLogin, ev.SourceBroadcasterUserName, ev.SourceMessageId, ev.SourceBadges, ev.IsSourceOnly),
+					BuildSourceBroadcasterMetadata(ev.SourceBroadcasterUserId, ev.SourceMessageId, ev.SourceBadges, ev.IsSourceOnly),
 					"PRIVMSG", // IRC type equivalent
 					(uint)(ev.Cheer?.Bits ?? 0)
 				);
@@ -1523,25 +1523,49 @@ namespace CatCore.Services.Twitch
 
 		private ReadOnlyDictionary<string, string> BuildLegacyUserNoticeMetadata(EventSubChatNotificationEvent ev, string notificationText)
 		{
+			var metadata = BuildLegacyUserNoticeMetadataCore(ev, notificationText);
+			if (!metadata.ContainsKey(IrcMessageTags.MSG_PARAM_PROFILE_IMAGE_URL))
+			{
+				var raid = ev.Raid ?? ev.SharedChatRaid;
+				var profileImageUrl = TryResolveProfileImageUrl(raid?.UserLogin ?? ev.ChatterUserLogin, raid?.UserId ?? ev.ChatterUserId);
+				if (profileImageUrl is { Length: > 0 })
+				{
+					metadata[IrcMessageTags.MSG_PARAM_PROFILE_IMAGE_URL] = profileImageUrl;
+				}
+			}
+
+			return new ReadOnlyDictionary<string, string>(metadata);
+		}
+
+		/// <summary>
+		/// Builds the IRC-style USERNOTICE metadata without the asynchronous profile-image lookup so the
+		/// shared-chat notice mapping can be unit tested deterministically. Notices that happened in
+		/// another channel of a shared chat use the shared_chat_* objects as fallbacks and carry the
+		/// official source-msg-id tag.
+		/// </summary>
+		internal static Dictionary<string, string> BuildLegacyUserNoticeMetadataCore(EventSubChatNotificationEvent ev, string notificationText)
+		{
+			var raid = ev.Raid ?? ev.SharedChatRaid;
+			var sub = ev.Sub ?? ev.SharedChatSub;
+			var resub = ev.Resub ?? ev.SharedChatResub;
+			var subGift = ev.SubGift ?? ev.SharedChatSubGift;
+			var communitySubGift = ev.CommunitySubGift ?? ev.SharedChatCommunitySubGift;
+			var giftPaidUpgrade = ev.GiftPaidUpgrade ?? ev.SharedChatGiftPaidUpgrade;
+			var primePaidUpgrade = ev.PrimePaidUpgrade ?? ev.SharedChatPrimePaidUpgrade;
+			var payItForward = ev.PayItForward ?? ev.SharedChatPayItForward;
+
 			var metadataLogin = ev.ChatterUserLogin;
 			var metadataDisplayName = ev.ChatterUserName;
-			var profileLookupUserId = ev.ChatterUserId;
-
-			if (ev.Raid.HasValue)
+			if (raid.HasValue)
 			{
-				if (!string.IsNullOrWhiteSpace(ev.Raid.Value.UserLogin))
+				if (!string.IsNullOrWhiteSpace(raid.Value.UserLogin))
 				{
-					metadataLogin = ev.Raid.Value.UserLogin;
+					metadataLogin = raid.Value.UserLogin;
 				}
 
-				if (!string.IsNullOrWhiteSpace(ev.Raid.Value.UserName))
+				if (!string.IsNullOrWhiteSpace(raid.Value.UserName))
 				{
-					metadataDisplayName = ev.Raid.Value.UserName;
-				}
-
-				if (!string.IsNullOrWhiteSpace(ev.Raid.Value.UserId))
-				{
-					profileLookupUserId = ev.Raid.Value.UserId;
+					metadataDisplayName = raid.Value.UserName;
 				}
 			}
 
@@ -1550,6 +1574,13 @@ namespace CatCore.Services.Twitch
 				[IrcMessageTags.MSG_ID] = MapNoticeTypeToLegacyMsgId(ev.NoticeType),
 				[IrcMessageTags.SYSTEM_MSG] = EscapeLegacyIrcSystemMessage(notificationText)
 			};
+
+			if (ev.NoticeType is { Length: > 0 } noticeType && noticeType.StartsWith("shared_chat_", StringComparison.Ordinal))
+			{
+				// IRC delivers a notice that happened in another channel of a shared chat as
+				// msg-id=sharedchatnotice, with the original notice type in source-msg-id.
+				metadata[IrcMessageTags.SOURCE_MSG_ID] = MapUnderlyingNoticeTypeToLegacyMsgId(noticeType.Substring("shared_chat_".Length));
+			}
 
 			if (!string.IsNullOrWhiteSpace(metadataLogin))
 			{
@@ -1561,39 +1592,37 @@ namespace CatCore.Services.Twitch
 				metadata[IrcMessageTags.MSG_PARAM_DISPLAY_NAME] = metadataDisplayName;
 			}
 
-			var raidProfileImageUrl = ev.Raid?.ProfileImageUrl;
-			var profileImageUrl = !string.IsNullOrWhiteSpace(raidProfileImageUrl) ? raidProfileImageUrl : TryResolveProfileImageUrl(metadataLogin, profileLookupUserId);
-			if (profileImageUrl is { Length: > 0 })
+			if (raid?.ProfileImageUrl is { Length: > 0 } raidProfileImageUrl)
 			{
-				metadata[IrcMessageTags.MSG_PARAM_PROFILE_IMAGE_URL] = profileImageUrl;
+				metadata[IrcMessageTags.MSG_PARAM_PROFILE_IMAGE_URL] = raidProfileImageUrl;
 			}
 
-			if (ev.Raid.HasValue)
+			if (raid.HasValue)
 			{
-				metadata[IrcMessageTags.MSG_PARAM_VIEWER_COUNT] = ev.Raid.Value.ViewerCount.ToString();
+				metadata[IrcMessageTags.MSG_PARAM_VIEWER_COUNT] = raid.Value.ViewerCount.ToString();
 			}
 
-			if (ev.Sub.HasValue)
+			if (sub.HasValue)
 			{
-				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(ev.Sub.Value.IsPrime, ev.Sub.Value.SubTier);
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(sub.Value.IsPrime, sub.Value.SubTier);
 			}
 
-			if (ev.Resub.HasValue)
+			if (resub.HasValue)
 			{
-				var resub = ev.Resub.Value;
-				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(resub.IsPrime == true, resub.SubTier);
-				metadata[IrcMessageTags.MSG_PARAM_CUMULATIVE_MONTHS] = resub.CumulativeMonths.ToString();
-				metadata[IrcMessageTags.MSG_PARAM_MONTHS] = resub.DurationMonths.ToString();
+				var resubValue = resub.Value;
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(resubValue.IsPrime == true, resubValue.SubTier);
+				metadata[IrcMessageTags.MSG_PARAM_CUMULATIVE_MONTHS] = resubValue.CumulativeMonths.ToString();
+				metadata[IrcMessageTags.MSG_PARAM_MONTHS] = resubValue.DurationMonths.ToString();
 
-				if (resub.IsGift)
+				if (resubValue.IsGift)
 				{
-					var gifterUserLogin = resub.GifterUserLogin;
+					var gifterUserLogin = resubValue.GifterUserLogin;
 					if (!string.IsNullOrWhiteSpace(gifterUserLogin))
 					{
 						metadata[IrcMessageTags.MSG_PARAM_SENDER_LOGIN] = gifterUserLogin!;
 					}
 
-					var gifterUserName = resub.GifterUserName;
+					var gifterUserName = resubValue.GifterUserName;
 					if (!string.IsNullOrWhiteSpace(gifterUserName))
 					{
 						metadata[IrcMessageTags.MSG_PARAM_SENDER_NAME] = gifterUserName!;
@@ -1601,102 +1630,101 @@ namespace CatCore.Services.Twitch
 				}
 			}
 
-			if (ev.SubGift.HasValue)
+			if (subGift.HasValue)
 			{
-				var subGift = ev.SubGift.Value;
-				if (!string.IsNullOrWhiteSpace(subGift.RecipientUserLogin))
+				var subGiftValue = subGift.Value;
+				if (!string.IsNullOrWhiteSpace(subGiftValue.RecipientUserLogin))
 				{
-					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_USER_NAME] = subGift.RecipientUserLogin;
+					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_USER_NAME] = subGiftValue.RecipientUserLogin;
 				}
 
-				if (!string.IsNullOrWhiteSpace(subGift.RecipientUserName))
+				if (!string.IsNullOrWhiteSpace(subGiftValue.RecipientUserName))
 				{
-					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_DISPLAY_NAME] = subGift.RecipientUserName;
+					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_DISPLAY_NAME] = subGiftValue.RecipientUserName;
 				}
 
-				if (!string.IsNullOrWhiteSpace(subGift.RecipientUserId))
+				if (!string.IsNullOrWhiteSpace(subGiftValue.RecipientUserId))
 				{
-					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_ID] = subGift.RecipientUserId;
+					metadata[IrcMessageTags.MSG_PARAM_RECIPIENT_ID] = subGiftValue.RecipientUserId;
 				}
 
-				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = subGift.SubTier;
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = subGiftValue.SubTier;
 			}
 
-			if (ev.CommunitySubGift.HasValue)
+			if (communitySubGift.HasValue)
 			{
-				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ev.CommunitySubGift.Value.SubTier;
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = communitySubGift.Value.SubTier;
 			}
 
-			if (ev.GiftPaidUpgrade.HasValue)
+			if (giftPaidUpgrade.HasValue)
 			{
-				var giftPaidUpgrade = ev.GiftPaidUpgrade.Value;
-				AddLegacyGifterTags(metadata, giftPaidUpgrade.GifterIsAnonymous, giftPaidUpgrade.GifterUserLogin, giftPaidUpgrade.GifterUserName);
+				var giftPaidUpgradeValue = giftPaidUpgrade.Value;
+				AddLegacyGifterTags(metadata, giftPaidUpgradeValue.GifterIsAnonymous, giftPaidUpgradeValue.GifterUserLogin, giftPaidUpgradeValue.GifterUserName);
 			}
 
-			if (ev.PrimePaidUpgrade.HasValue)
+			if (primePaidUpgrade.HasValue)
 			{
-				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(true, ev.PrimePaidUpgrade.Value.SubTier);
+				metadata[IrcMessageTags.MSG_PARAM_SUB_PLAN] = ResolveSubPlan(true, primePaidUpgrade.Value.SubTier);
 			}
 
-			if (ev.PayItForward.HasValue)
+			if (payItForward.HasValue)
 			{
-				var payItForward = ev.PayItForward.Value;
-				AddLegacyGifterTags(metadata, payItForward.GifterIsAnonymous, payItForward.GifterUserLogin, payItForward.GifterUserName);
+				var payItForwardValue = payItForward.Value;
+				AddLegacyGifterTags(metadata, payItForwardValue.GifterIsAnonymous, payItForwardValue.GifterUserLogin, payItForwardValue.GifterUserName);
 			}
 
-			AddSourceBroadcasterTags(metadata, ev.SourceBroadcasterUserId, ev.SourceBroadcasterUserLogin, ev.SourceBroadcasterUserName,
-				ev.SourceMessageId, ev.SourceBadges, ev.IsSourceOnly);
+			AddSourceBroadcasterTags(metadata, ev.SourceBroadcasterUserId, ev.SourceMessageId, ev.SourceBadges, ev.IsSourceOnly, includeSourceOnly: false);
 
-			return new ReadOnlyDictionary<string, string>(metadata);
+			return metadata;
 		}
 
-		private static ReadOnlyDictionary<string, string>? BuildSourceBroadcasterMetadata(string? sourceBroadcasterUserId, string? sourceBroadcasterUserLogin,
-			string? sourceBroadcasterUserName, string? sourceMessageId, List<EventSubBadge>? sourceBadges, bool? isSourceOnly)
+		internal static ReadOnlyDictionary<string, string>? BuildSourceBroadcasterMetadata(string? sourceBroadcasterUserId, string? sourceMessageId,
+			List<EventSubBadge>? sourceBadges, bool? isSourceOnly)
 		{
-			if (string.IsNullOrWhiteSpace(sourceBroadcasterUserId) && string.IsNullOrWhiteSpace(sourceMessageId))
+			if (string.IsNullOrWhiteSpace(sourceBroadcasterUserId) && string.IsNullOrWhiteSpace(sourceMessageId)
+			    && sourceBadges is not { Count: > 0 } && isSourceOnly is null)
 			{
 				return null;
 			}
 
 			var metadata = new Dictionary<string, string>(StringComparer.Ordinal);
-			AddSourceBroadcasterTags(metadata, sourceBroadcasterUserId, sourceBroadcasterUserLogin, sourceBroadcasterUserName, sourceMessageId, sourceBadges, isSourceOnly);
+			AddSourceBroadcasterTags(metadata, sourceBroadcasterUserId, sourceMessageId, sourceBadges, isSourceOnly, includeSourceOnly: true);
 			return new ReadOnlyDictionary<string, string>(metadata);
 		}
 
-		private static void AddSourceBroadcasterTags(Dictionary<string, string> metadata, string? sourceBroadcasterUserId, string? sourceBroadcasterUserLogin,
-			string? sourceBroadcasterUserName, string? sourceMessageId, List<EventSubBadge>? sourceBadges, bool? isSourceOnly)
+		private static void AddSourceBroadcasterTags(Dictionary<string, string> metadata, string? sourceBroadcasterUserId, string? sourceMessageId,
+			List<EventSubBadge>? sourceBadges, bool? isSourceOnly, bool includeSourceOnly)
 		{
 			if (!string.IsNullOrWhiteSpace(sourceBroadcasterUserId))
 			{
-				metadata[IrcMessageTags.SOURCE_BROADCASTER_USER_ID] = sourceBroadcasterUserId!;
-			}
-
-			if (!string.IsNullOrWhiteSpace(sourceBroadcasterUserLogin))
-			{
-				metadata[IrcMessageTags.SOURCE_BROADCASTER_LOGIN] = sourceBroadcasterUserLogin!;
-			}
-
-			if (!string.IsNullOrWhiteSpace(sourceBroadcasterUserName))
-			{
-				metadata[IrcMessageTags.SOURCE_BROADCASTER_NAME] = sourceBroadcasterUserName!;
+				// The source channel's user id is the shared-chat room id.
+				metadata[IrcMessageTags.SOURCE_ROOM_ID] = sourceBroadcasterUserId!;
 			}
 
 			if (!string.IsNullOrWhiteSpace(sourceMessageId))
 			{
-				metadata[IrcMessageTags.SOURCE_MESSAGE_ID] = sourceMessageId!;
+				metadata[IrcMessageTags.SOURCE_ID] = sourceMessageId!;
 			}
 
 			if (sourceBadges is { Count: > 0 })
 			{
 				metadata[IrcMessageTags.SOURCE_BADGES] = string.Join(",", sourceBadges.Select(badge => $"{badge.SetId}/{badge.Id}"));
+
+				var badgeInfos = sourceBadges
+					.Where(badge => !string.IsNullOrWhiteSpace(badge.Info))
+					.Select(badge => $"{badge.SetId}/{badge.Info}")
+					.ToList();
+				if (badgeInfos.Count > 0)
+				{
+					metadata[IrcMessageTags.SOURCE_BADGE_INFO] = string.Join(",", badgeInfos);
+				}
 			}
 
-			if (isSourceOnly == true)
+			if (includeSourceOnly && isSourceOnly.HasValue)
 			{
-				metadata[IrcMessageTags.IS_SOURCE_ONLY] = "1";
+				metadata[IrcMessageTags.SOURCE_ONLY] = isSourceOnly.Value ? "1" : "0";
 			}
 		}
-
 		private static void AddLegacyGifterTags(Dictionary<string, string> metadata, bool gifterIsAnonymous, string? gifterUserLogin, string? gifterUserName)
 		{
 			if (gifterIsAnonymous)
@@ -1725,6 +1753,8 @@ namespace CatCore.Services.Twitch
 			return string.IsNullOrWhiteSpace(subTier) ? string.Empty : subTier!;
 		}
 
+		internal const string SHARED_CHAT_NOTICE_MSG_ID = "sharedchatnotice";
+
 		internal static string MapNoticeTypeToLegacyMsgId(string? noticeType)
 		{
 			if (noticeType is not { Length: > 0 })
@@ -1732,13 +1762,16 @@ namespace CatCore.Services.Twitch
 				return "usernotice";
 			}
 
-			// Notices that happened in another channel of a shared-chat session use the same notice
-			// vocabulary with a shared_chat_ prefix; the legacy msg-id is identical.
-			var normalizedNoticeType = noticeType.StartsWith("shared_chat_", StringComparison.Ordinal)
-				? noticeType.Substring("shared_chat_".Length)
-				: noticeType;
+			// A notice that happened in another channel of a shared chat is delivered as
+			// msg-id=sharedchatnotice, with the original notice type in the source-msg-id tag.
+			return noticeType.StartsWith("shared_chat_", StringComparison.Ordinal)
+				? SHARED_CHAT_NOTICE_MSG_ID
+				: MapUnderlyingNoticeTypeToLegacyMsgId(noticeType);
+		}
 
-			return normalizedNoticeType switch
+		internal static string MapUnderlyingNoticeTypeToLegacyMsgId(string? noticeType)
+		{
+			return noticeType switch
 			{
 				"sub" => "sub",
 				"resub" => "resub",
@@ -1751,10 +1784,14 @@ namespace CatCore.Services.Twitch
 				"unraid" => "unraid",
 				"announcement" => "announcement",
 				"bits_badge_tier" => "bitsbadgetier",
-				_ => noticeType
+				"charity_donation" => "charitydonation",
+				"watch_streak" => "watchstreak",
+				"modiversary" => "modiversary",
+				"gifted_drops_summary" => "gifteddropssummary",
+				null or "" => "usernotice",
+				_ => noticeType!
 			};
 		}
-
 		private string? TryResolveProfileImageUrl(string? loginName, string? userId)
 		{
 			if (!string.IsNullOrWhiteSpace(userId) && _profileImageUrlCache.TryGetValue($"id:{userId}", out var cachedById))
@@ -1856,8 +1893,8 @@ namespace CatCore.Services.Twitch
 				"unraid" => $"{GetPreferredDisplayName(ev)} canceled the raid.",
 				"charity_donation" => BuildCharityDonationNotificationText(ev),
 				"watch_streak" => BuildWatchStreakNotificationText(ev),
-				"modiversary" => $"{GetPreferredDisplayName(ev)} has been a moderator for {ev.Modiversary?.Months ?? 0} months.",
-				"gifted_drops_summary" => $"Gifted drops were granted to {ev.GiftedDropsSummary?.RecipientCount ?? 0} users.",
+				"modiversary" => $"{GetPreferredDisplayName(ev)} has been a moderator for {(ev.Modiversary ?? ev.SharedChatModiversary)?.Months ?? 0} months.",
+				"gifted_drops_summary" => $"Gifted drops were granted to {(ev.GiftedDropsSummary ?? ev.SharedChatGiftedDropsSummary)?.RecipientCount ?? 0} users.",
 				_ => string.Empty
 			};
 		}
@@ -1870,7 +1907,7 @@ namespace CatCore.Services.Twitch
 				gifterName = "An anonymous gifter";
 			}
 
-			var total = ev.CommunitySubGift?.Total ?? 0;
+			var total = (ev.CommunitySubGift ?? ev.SharedChatCommunitySubGift)?.Total ?? 0;
 			return total > 1
 				? $"{gifterName} gifted {total} subscriptions to the community."
 				: $"{gifterName} gifted a subscription to the community.";
@@ -1911,13 +1948,14 @@ namespace CatCore.Services.Twitch
 
 		private static string BuildRaidNotificationText(EventSubChatNotificationEvent ev)
 		{
-			var raiderName = ev.Raid?.UserName;
+			var raid = ev.Raid ?? ev.SharedChatRaid;
+			var raiderName = raid?.UserName;
 			if (string.IsNullOrWhiteSpace(raiderName))
 			{
 				raiderName = GetPreferredDisplayName(ev);
 			}
 
-			var viewerCount = ev.Raid?.ViewerCount ?? 0;
+			var viewerCount = raid?.ViewerCount ?? 0;
 			var viewerLabel = viewerCount == 1 ? "viewer" : "viewers";
 			return viewerCount > 0
 				? $"{raiderName} is raiding with a party of {viewerCount} {viewerLabel}."
@@ -1927,7 +1965,7 @@ namespace CatCore.Services.Twitch
 		private static string BuildResubNotificationText(EventSubChatNotificationEvent ev)
 		{
 			var userName = GetPreferredDisplayName(ev);
-			var cumulativeMonths = ev.Resub?.CumulativeMonths ?? 0;
+			var cumulativeMonths = (ev.Resub ?? ev.SharedChatResub)?.CumulativeMonths ?? 0;
 			return cumulativeMonths > 0
 				? $"{userName} subscribed for {cumulativeMonths} months."
 				: $"{userName} resubscribed.";
@@ -1936,7 +1974,7 @@ namespace CatCore.Services.Twitch
 		private static string BuildGiftSubNotificationText(EventSubChatNotificationEvent ev)
 		{
 			var gifterName = GetPreferredDisplayName(ev);
-			var recipientName = ev.SubGift?.RecipientUserName;
+			var recipientName = (ev.SubGift ?? ev.SharedChatSubGift)?.RecipientUserName;
 			return !string.IsNullOrWhiteSpace(recipientName)
 				? $"{gifterName} gifted a sub to {recipientName}."
 				: $"{gifterName} gifted a subscription.";
@@ -1963,9 +2001,9 @@ namespace CatCore.Services.Twitch
 				return ev.ChatterUserLogin;
 			}
 
-			if (!string.IsNullOrWhiteSpace(ev.Raid?.UserName))
+			if (!string.IsNullOrWhiteSpace((ev.Raid ?? ev.SharedChatRaid)?.UserName))
 			{
-				return ev.Raid?.UserName ?? string.Empty;
+				return (ev.Raid ?? ev.SharedChatRaid)!.Value.UserName;
 			}
 
 			return string.Empty;
