@@ -40,12 +40,13 @@ namespace CatCoreTests
 			data.Types.Should().Contain("manually_added");
 			data.BanEvasionEvaluation.Should().Be("likely");
 			data.Message.Should().NotBeNull();
-			data.Message!.Value.MessageId.Should().Be("abc-123");
-			data.Message!.Value.Text.Should().Be("hello");
-			data.Message!.Value.Fragments.Should().HaveCount(1);
-			data.Message!.Value.Fragments[0].Type.Should().Be("text");
-			data.Message!.Value.Fragments[0].Cheermote.Should().BeNull();
-			data.Message!.Value.Fragments[0].Emote.Should().BeNull();
+			var message = data.Message!.Value;
+			message.MessageId.Should().Be("abc-123");
+			message.Text.Should().Be("hello");
+			message.Fragments.Should().HaveCount(1);
+			message.Fragments![0].Type.Should().Be("text");
+			message.Fragments![0].Cheermote.Should().BeNull();
+			message.Fragments![0].Emote.Should().BeNull();
 		}
 
 		[Fact]

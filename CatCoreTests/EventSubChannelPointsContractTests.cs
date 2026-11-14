@@ -40,15 +40,17 @@ namespace CatCoreTests
 			data.Reward.ChannelPoints.Should().Be(100);
 			data.Reward.Emote.HasValue.Should().BeFalse();
 			data.Message.HasValue.Should().BeTrue();
-			data.Message.Value.Text.Should().Be("Hello world! VoHiYo");
-			data.Message.Value.Fragments.Should().NotBeNull();
-			data.Message.Value.Fragments!.Length.Should().Be(2);
-			data.Message.Value.Fragments[0].Type.Should().Be("text");
-			data.Message.Value.Fragments[0].Text.Should().Be("Hello world! ");
-			data.Message.Value.Fragments[0].Emote.HasValue.Should().BeFalse();
-			data.Message.Value.Fragments[1].Type.Should().Be("emote");
-			data.Message.Value.Fragments[1].Text.Should().Be("VoHiYo");
-			data.Message.Value.Fragments[1].Emote.Value.Id.Should().Be("81274");
+			var message = data.Message.GetValueOrDefault();
+			message.Text.Should().Be("Hello world! VoHiYo");
+			message.Fragments.Should().NotBeNull();
+			message.Fragments!.Length.Should().Be(2);
+			message.Fragments[0].Type.Should().Be("text");
+			message.Fragments[0].Text.Should().Be("Hello world! ");
+			message.Fragments[0].Emote.HasValue.Should().BeFalse();
+			message.Fragments[1].Type.Should().Be("emote");
+			message.Fragments[1].Text.Should().Be("VoHiYo");
+			message.Fragments[1].Emote.HasValue.Should().BeTrue();
+			message.Fragments[1].Emote.GetValueOrDefault().Id.Should().Be("81274");
 			data.RedeemedAt.Should().Be("2024-08-12T21:14:34.260398045Z");
 		}
 
@@ -123,9 +125,10 @@ namespace CatCoreTests
 			data.GlobalCooldown.Seconds.Should().Be(1000);
 			data.BackgroundColor.Should().Be("#FA1ED2");
 			data.Image.HasValue.Should().BeTrue();
-			data.Image.Value.Url1x.Should().Be("https://static-cdn.jtvnw.net/image-1.png");
-			data.Image.Value.Url2x.Should().Be("https://static-cdn.jtvnw.net/image-2.png");
-			data.Image.Value.Url4x.Should().Be("https://static-cdn.jtvnw.net/image-4.png");
+			var image = data.Image.GetValueOrDefault();
+			image.Url1x.Should().Be("https://static-cdn.jtvnw.net/image-1.png");
+			image.Url2x.Should().Be("https://static-cdn.jtvnw.net/image-2.png");
+			image.Url4x.Should().Be("https://static-cdn.jtvnw.net/image-4.png");
 			data.DefaultImage.Url1x.Should().Be("https://static-cdn.jtvnw.net/default-1.png");
 			data.DefaultImage.Url4x.Should().Be("https://static-cdn.jtvnw.net/default-4.png");
 		}
