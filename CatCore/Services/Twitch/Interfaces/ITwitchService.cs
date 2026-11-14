@@ -17,6 +17,14 @@ namespace CatCore.Services.Twitch.Interfaces
 		ITwitchPubSubServiceManager GetPubSubService();
 
 		/// <summary>
+		/// Returns the EventSub service. Allows you to subscribe to the events of the supported
+		/// EventSub subscription types.
+		/// </summary>
+		/// <returns>Returns the EventSub service</returns>
+		[PublicAPI]
+		ITwitchEventSubService GetEventSubService();
+
+		/// <summary>
 		/// Returns the Helix API service. Allows you to interact with the Twitch Helix API.
 		/// </summary>
 		/// <returns></returns>
