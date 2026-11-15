@@ -33,6 +33,9 @@ namespace CatCore.Services.Twitch
 		private readonly SemaphoreSlim _refreshLocker = new(1, 1);
 		private readonly SemaphoreSlim _loggedInUserUpdateLocker = new(1, 1);
 
+		/// <summary>
+		/// Scopes that CatCore cannot work without. A token that is missing one of them is rejected.
+		/// </summary>
 		private readonly string[] _twitchAuthorizationScope =
 		{
 			"bits:read",
@@ -59,6 +62,31 @@ namespace CatCore.Services.Twitch
 			"moderator:read:followers",
 			"user:manage:chat_color",
 			"user:read:follows"
+		};
+
+		/// <summary>
+		/// Scopes that unlock the optional EventSub subscription types (hype train, goals, charity,
+		/// moderation tooling, ...). They are requested during authorization, but a token that is
+		/// missing one of them is still valid: the matching subscriptions are simply not created.
+		/// </summary>
+		private readonly string[] _twitchOptionalAuthorizationScope =
+		{
+			"channel:read:charity",
+			"channel:read:goals",
+			"channel:read:hype_train",
+			"channel:read:vips",
+			"moderation:read",
+			"moderator:manage:automod",
+			"moderator:manage:automod_settings",
+			"moderator:read:blocked_terms",
+			"moderator:read:moderators",
+			"moderator:read:shield_mode",
+			"moderator:read:shoutouts",
+			"moderator:read:suspicious_users",
+			"moderator:read:unban_requests",
+			"moderator:read:vips",
+			"moderator:read:warnings",
+			"user:read:whispers"
 		};
 
 		private readonly ILogger _logger;
@@ -351,12 +379,13 @@ namespace CatCore.Services.Twitch
 
 		public string AuthorizationUrl(string redirectUrl)
 		{
+			var scopes = _twitchAuthorizationScope.Concat(_twitchOptionalAuthorizationScope);
 			return $"{TWITCH_AUTH_BASEURL}authorize" +
 			       $"?client_id={_constants.TwitchClientId}" +
 			       $"&redirect_uri={redirectUrl}" +
 			       "&response_type=code" +
 			       "&force_verify=true" +
-			       $"&scope={string.Join(" ", _twitchAuthorizationScope)}";
+			       $"&scope={string.Join(" ", scopes)}";
 		}
 
 		public async Task GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl)

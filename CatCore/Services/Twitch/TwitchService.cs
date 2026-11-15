@@ -15,19 +15,21 @@ namespace CatCore.Services.Twitch
 		private readonly ITwitchAuthService _twitchAuthService;
 		private readonly ITwitchIrcService _twitchIrcService;
 		private readonly ITwitchPubSubServiceManager _twitchPubSubServiceManager;
+		private readonly ITwitchEventSubService _twitchEventSubService;
 		private readonly ITwitchHelixApiService _twitchHelixApiService;
 		private readonly ITwitchRoomStateTrackerService _twitchRoomStateTrackerService;
 		private readonly ITwitchUserStateTrackerService _twitchUserStateTrackerService;
 		private readonly ITwitchChannelManagementService _twitchChannelManagementService;
 
 		internal TwitchService(ILogger logger, ITwitchAuthService twitchAuthService, ITwitchIrcService twitchIrcService, ITwitchPubSubServiceManager twitchPubSubServiceManager,
-			ITwitchHelixApiService twitchHelixApiService, ITwitchRoomStateTrackerService twitchRoomStateTrackerService, ITwitchUserStateTrackerService twitchUserStateTrackerService,
-			ITwitchChannelManagementService twitchChannelManagementService)
+			ITwitchEventSubService twitchEventSubService, ITwitchHelixApiService twitchHelixApiService, ITwitchRoomStateTrackerService twitchRoomStateTrackerService,
+			ITwitchUserStateTrackerService twitchUserStateTrackerService, ITwitchChannelManagementService twitchChannelManagementService)
 		{
 			_logger = logger;
 			_twitchAuthService = twitchAuthService;
 			_twitchIrcService = twitchIrcService;
 			_twitchPubSubServiceManager = twitchPubSubServiceManager;
+			_twitchEventSubService = twitchEventSubService;
 			_twitchHelixApiService = twitchHelixApiService;
 			_twitchRoomStateTrackerService = twitchRoomStateTrackerService;
 			_twitchUserStateTrackerService = twitchUserStateTrackerService;
@@ -37,6 +39,9 @@ namespace CatCore.Services.Twitch
 		/// <inheritdoc />
 		[Obsolete("Twitch Legacy PubSub was decommissioned. Migrate to EventSub-based APIs.")]
 		public ITwitchPubSubServiceManager GetPubSubService() => _twitchPubSubServiceManager;
+
+		/// <inheritdoc />
+		public ITwitchEventSubService GetEventSubService() => _twitchEventSubService;
 
 		/// <inheritdoc />
 		public ITwitchHelixApiService GetHelixApiService() => _twitchHelixApiService;

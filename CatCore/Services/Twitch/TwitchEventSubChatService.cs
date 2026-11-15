@@ -23,6 +23,7 @@ using CatCore.Models.Twitch.PubSub.Responses.Predictions;
 using CatCore.Models.Twitch.PubSub.Responses.VideoPlayback;
 using CatCore.Models.Twitch.Shared;
 using CatCore.Services.Interfaces;
+using CatCore.Services.Twitch.EventSub;
 using CatCore.Services.Twitch.Interfaces;
 using CatCore.Services.Twitch.Media;
 using Serilog;
@@ -32,7 +33,7 @@ using RewardUser = CatCore.Models.Twitch.PubSub.Responses.ChannelPointsChannelV1
 
 namespace CatCore.Services.Twitch
 {
-	internal sealed class TwitchEventSubChatService : ITwitchIrcService, ITwitchPubSubServiceManager
+	internal sealed class TwitchEventSubChatService : ITwitchIrcService, ITwitchPubSubServiceManager, ITwitchEventSubService
 	{
 		private const string TWITCH_EVENTSUB_ENDPOINT = "wss://eventsub.wss.twitch.tv/ws";
 
@@ -81,6 +82,20 @@ namespace CatCore.Services.Twitch
 
 		// channelId → subscriptionIds[]
 		private readonly ConcurrentDictionary<string, List<string>> _channelSubscriptionIds;
+		private readonly ConcurrentDictionary<string, List<string>> _optionalChannelSubscriptionIds = new();
+		private readonly ConcurrentDictionary<string, string> _optionalChannelSubscriptionSessionIds = new();
+		private readonly List<string> _userSubscriptionIds = new();
+
+		// The handlers of the optional EventSub subscription types.
+		private readonly EventSubEventHub _eventSubHub;
+		private readonly EventSubSubscriptionPlanner _eventSubSubscriptionPlanner;
+
+		// The Twitch subscription cost of every subscription that is currently active.
+		private readonly ConcurrentDictionary<string, int> _subscriptionCosts = new(StringComparer.Ordinal);
+		private int _estimatedSubscriptionCost;
+
+		// Twitch allows a total subscription cost of 10 per user token on the WebSocket transport.
+		private const int MAX_EVENTSUB_SUBSCRIPTION_COST = 10;
 		private readonly ConcurrentDictionary<Action<string, ViewCountUpdate>, bool> _viewCountCallbackRegistrations = new();
 		private readonly ConcurrentDictionary<string, string> _profileImageUrlCache = new(StringComparer.OrdinalIgnoreCase);
 
@@ -129,6 +144,9 @@ namespace CatCore.Services.Twitch
 			_twitchChannelManagementService.ChannelsUpdated += TwitchChannelManagementServiceOnChannelsUpdated;
 
 			_channelSubscriptionIds = new ConcurrentDictionary<string, List<string>>();
+
+			_eventSubHub = new EventSubEventHub(logger);
+			_eventSubSubscriptionPlanner = new EventSubSubscriptionPlanner(_eventSubHub.SubscriptionSpecs);
 		}
 
 		public event Action? OnChatConnected;
@@ -168,6 +186,26 @@ namespace CatCore.Services.Twitch
 		public event Action<string, PollData>? OnPoll;
 		public event Action<string, PredictionData>? OnPrediction;
 		public event Action<string, RewardRedeemedData>? OnRewardRedeemed;
+
+		public ITwitchEventSubHypeTrainEvents HypeTrain => _eventSubHub.HypeTrain;
+
+		public ITwitchEventSubGoalEvents Goal => _eventSubHub.Goal;
+
+		public ITwitchEventSubCharityEvents Charity => _eventSubHub.Charity;
+
+		public ITwitchEventSubUserEvents User => _eventSubHub.User;
+
+		public ITwitchEventSubSubscriptionEvents Subscriptions => _eventSubHub.Subscriptions;
+
+		public ITwitchEventSubChannelActivityEvents ChannelActivity => _eventSubHub.ChannelActivity;
+
+		public ITwitchEventSubModerationEvents Moderation => _eventSubHub.Moderation;
+
+		public ITwitchEventSubChannelPointsEvents ChannelPoints => _eventSubHub.ChannelPoints;
+
+		public ITwitchEventSubAutoModEvents AutoMod => _eventSubHub.AutoMod;
+
+		public ITwitchEventSubSafetyEvents Safety => _eventSubHub.Safety;
 
 		public void SendMessage(TwitchChannel channel, string message)
 		{
@@ -376,7 +414,31 @@ namespace CatCore.Services.Twitch
 			if (keepAliveSubscriptionId is { Length: > 0 })
 			{
 				await _twitchHelixApiService.DeleteEventSubSubscription(keepAliveSubscriptionId).ConfigureAwait(false);
+				ReleaseSubscriptionCost(keepAliveSubscriptionId);
 			}
+
+			foreach (var optionalChannelId in _optionalChannelSubscriptionIds.Keys.ToList())
+			{
+				_optionalChannelSubscriptionSessionIds.TryRemove(optionalChannelId, out var _);
+				if (_optionalChannelSubscriptionIds.TryRemove(optionalChannelId, out var optionalSubscriptionIds))
+				{
+					foreach (var optionalSubscriptionId in optionalSubscriptionIds)
+					{
+						await _twitchHelixApiService.DeleteEventSubSubscription(optionalSubscriptionId).ConfigureAwait(false);
+						ReleaseSubscriptionCost(optionalSubscriptionId);
+					}
+				}
+			}
+
+			foreach (var userSubscriptionId in _userSubscriptionIds.ToList())
+			{
+				await _twitchHelixApiService.DeleteEventSubSubscription(userSubscriptionId).ConfigureAwait(false);
+				ReleaseSubscriptionCost(userSubscriptionId);
+			}
+
+			_userSubscriptionIds.Clear();
+			_subscriptionCosts.Clear();
+			Interlocked.Exchange(ref _estimatedSubscriptionCost, 0);
 
 			await _kittenWebSocketProvider.Disconnect().ConfigureAwait(false);
 
@@ -445,6 +507,7 @@ namespace CatCore.Services.Twitch
 						try
 						{
 							await SubscribeToChannelInternal(channelId, channelName).ConfigureAwait(false);
+							await SubscribeToOptionalChannelEventTypesInternal(channelId).ConfigureAwait(false);
 						}
 						catch (Exception ex)
 						{
@@ -582,6 +645,267 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
+		/// <summary>
+		/// Creates the subscriptions of the optional (non-chat) EventSub types for a single channel.
+		/// </summary>
+		private async Task SubscribeToOptionalChannelEventTypesInternal(string channelId)
+		{
+			if (_sessionId == null || _loggedInUser == null)
+			{
+				return;
+			}
+
+			await _subscriptionManagementSemaphoreSlim.WaitAsync().ConfigureAwait(false);
+			try
+			{
+				// The optional subscriptions of a channel are created once per session. Without this
+				// guard, a channel that is enabled while a session is being established would be
+				// subscribed twice, which Twitch rejects with a conflict.
+				if (_optionalChannelSubscriptionSessionIds.TryGetValue(channelId, out var existingSessionId)
+					&& string.Equals(existingSessionId, _sessionId, StringComparison.Ordinal))
+				{
+					return;
+				}
+
+				await SubscribeToOptionalChannelEventTypesCoreInternal(channelId).ConfigureAwait(false);
+			}
+			finally
+			{
+				_subscriptionManagementSemaphoreSlim.Release();
+			}
+		}
+
+		private async Task SubscribeToOptionalChannelEventTypesCoreInternal(string channelId)
+		{
+			var sessionId = _sessionId!;
+			var loggedInUserId = _loggedInUser!.Value.UserId;
+			var grantedScopes = GetGrantedScopes();
+			var plans = _eventSubSubscriptionPlanner.CreateChannelSubscriptions(channelId, loggedInUserId, grantedScopes);
+			if (plans.Count == 0)
+			{
+				return;
+			}
+
+			// The previous subscriptions of this channel are deleted first, so that the cost budget
+			// reflects the subscriptions that are actually active.
+			if (_optionalChannelSubscriptionIds.TryRemove(channelId, out var previousSubscriptionIds))
+			{
+				_optionalChannelSubscriptionSessionIds.TryRemove(channelId, out _);
+				foreach (var previousId in previousSubscriptionIds)
+				{
+					await _twitchHelixApiService.DeleteEventSubSubscription(previousId).ConfigureAwait(false);
+					ReleaseSubscriptionCost(previousId);
+				}
+			}
+
+			var subscriptionIds = new List<string>();
+			var failedTypes = new List<string>();
+			foreach (var plan in plans)
+			{
+				var cost = CalculateSubscriptionCost(plan.RequiresUserAuthorization, plan.Condition, loggedInUserId);
+				if (Interlocked.Add(ref _estimatedSubscriptionCost, 0) + cost > MAX_EVENTSUB_SUBSCRIPTION_COST)
+				{
+					_logger.Warning("Skipping EventSub subscription type {SubscriptionType} for channel {ChannelId}: the Twitch subscription cost limit would be exceeded",
+						plan.Type, channelId);
+					continue;
+				}
+
+				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(plan.Type, plan.Version, plan.Condition, sessionId).ConfigureAwait(false);
+				if (subscriptionId != null)
+				{
+					subscriptionIds.Add(subscriptionId);
+					TrackSubscriptionCost(subscriptionId, cost);
+				}
+				else
+				{
+					_logger.Warning("Failed to create EventSub subscription type {SubscriptionType} for channel {ChannelId}", plan.Type, channelId);
+					failedTypes.Add(plan.Type);
+				}
+			}
+
+			if (subscriptionIds.Count == 0)
+			{
+				return;
+			}
+
+			// Track the successfully created set; the previous ones were already deleted above.
+			_optionalChannelSubscriptionIds[channelId] = subscriptionIds;
+			_optionalChannelSubscriptionSessionIds[channelId] = sessionId;
+
+			if (failedTypes.Count > 0)
+			{
+				_logger.Warning("Optional EventSub subscriptions partially created for channel {ChannelId}. Created={CreatedCount}, FailedTypes={FailedTypes}",
+					channelId, subscriptionIds.Count, string.Join(",", failedTypes));
+			}
+		}
+
+		/// <summary>
+		/// Creates the user scoped EventSub subscriptions. They are created once per EventSub session
+		/// instead of once per channel because their condition only references the authorized user.
+		/// </summary>
+		private async Task SubscribeToUserEventTypesInternal()
+		{
+			if (_sessionId == null || _loggedInUser == null)
+			{
+				return;
+			}
+
+			var sessionId = _sessionId;
+			var loggedInUserId = _loggedInUser.Value.UserId;
+			var grantedScopes = GetGrantedScopes();
+			var plans = _eventSubSubscriptionPlanner.CreateSessionSubscriptions(loggedInUserId, grantedScopes);
+			if (plans.Count == 0)
+			{
+				return;
+			}
+
+			// The subscriptions of the previous session are deleted first, so that the cost budget
+			// reflects the subscriptions that are actually active.
+			var previousSubscriptionIds = _userSubscriptionIds.ToArray();
+			_userSubscriptionIds.Clear();
+			foreach (var previousId in previousSubscriptionIds)
+			{
+				await _twitchHelixApiService.DeleteEventSubSubscription(previousId).ConfigureAwait(false);
+				ReleaseSubscriptionCost(previousId);
+			}
+
+			var subscriptionIds = new List<string>();
+			foreach (var plan in plans)
+			{
+				var cost = CalculateSubscriptionCost(plan.RequiresUserAuthorization, plan.Condition, loggedInUserId);
+				if (Interlocked.Add(ref _estimatedSubscriptionCost, 0) + cost > MAX_EVENTSUB_SUBSCRIPTION_COST)
+				{
+					_logger.Warning("Skipping user scoped EventSub subscription type {SubscriptionType}: the Twitch subscription cost limit would be exceeded",
+						plan.Type);
+					continue;
+				}
+
+				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(plan.Type, plan.Version, plan.Condition, sessionId).ConfigureAwait(false);
+				if (subscriptionId != null)
+				{
+					subscriptionIds.Add(subscriptionId);
+					TrackSubscriptionCost(subscriptionId, cost);
+				}
+				else
+				{
+					_logger.Warning("Failed to create user scoped EventSub subscription type {SubscriptionType}", plan.Type);
+				}
+			}
+
+			if (subscriptionIds.Count == 0)
+			{
+				return;
+			}
+
+			// Track the successfully created set; the previous ones were already deleted above.
+			_userSubscriptionIds.AddRange(subscriptionIds);
+		}
+
+		/// <summary>
+		/// The scopes that were granted to the currently authorized user.
+		/// </summary>
+		private IReadOnlyCollection<string>? GetGrantedScopes()
+		{
+			if (_loggedInUser == null)
+			{
+				return null;
+			}
+
+			return _loggedInUser.Value.Scopes ?? Array.Empty<string>();
+		}
+
+		/// <summary>
+		/// Calculates how much a subscription counts against the Twitch subscription cost limit.
+		/// Only the subscription types that do not require a user authorization are billed, and even
+		/// those are free when the user of the condition already authorized the application.
+		/// </summary>
+		private static int CalculateSubscriptionCost(bool requiresUserAuthorization, IReadOnlyDictionary<string, string> condition, string loggedInUserId)
+		{
+			if (requiresUserAuthorization)
+			{
+				return 0;
+			}
+
+			var conditionUserId = GetConditionUserId(condition);
+			return string.Equals(conditionUserId, loggedInUserId, StringComparison.Ordinal) ? 0 : 1;
+		}
+
+		/// <summary>
+		/// Checks whether a subscription type requires the user of the condition to have authorized
+		/// the application. Those subscriptions are free of the Twitch subscription cost limit.
+		/// </summary>
+		private static bool RequiresUserAuthorization(string subscriptionType)
+		{
+			switch (subscriptionType)
+			{
+				case SUB_TYPE_STREAM_ONLINE:
+				case SUB_TYPE_STREAM_OFFLINE:
+				case "channel.update":
+				case "channel.raid":
+				case "user.update":
+					return false;
+				default:
+					return true;
+			}
+		}
+
+		/// <summary>
+		/// The user the condition of a subscription refers to.
+		/// </summary>
+		private static string GetConditionUserId(IReadOnlyDictionary<string, string> condition)
+		{
+			foreach (var key in new[] { "user_id", "broadcaster_user_id", "to_broadcaster_user_id", "from_broadcaster_user_id" })
+			{
+				if (condition.TryGetValue(key, out var userId))
+				{
+					return userId;
+				}
+			}
+
+			return string.Empty;
+		}
+
+		/// <summary>
+		/// Registers the cost of a subscription that was created successfully.
+		/// </summary>
+		private void TrackSubscriptionCost(string subscriptionId, int cost)
+		{
+			if (cost <= 0)
+			{
+				return;
+			}
+
+			_subscriptionCosts[subscriptionId] = cost;
+			Interlocked.Add(ref _estimatedSubscriptionCost, cost);
+		}
+
+		/// <summary>
+		/// Releases the cost of a subscription that is deleted.
+		/// </summary>
+		private void ReleaseSubscriptionCost(string subscriptionId)
+		{
+			if (_subscriptionCosts.TryRemove(subscriptionId, out var cost))
+			{
+				Interlocked.Add(ref _estimatedSubscriptionCost, -cost);
+			}
+		}
+
+		/// <summary>
+		/// Routes a notification of one of the optional EventSub types to its handler.
+		/// </summary>
+		private void HandleOptionalEventSubNotification(EventSubMetadata metadata, string rawMessage)
+		{
+			try
+			{
+				using var jsonDocument = JsonDocument.Parse(rawMessage);
+				var eventElement = jsonDocument.RootElement.GetProperty("payload").GetProperty("event");
+				_eventSubHub.Handle(metadata.SubscriptionType, metadata.SubscriptionVersion, eventElement.GetRawText());
+			}
+			catch (Exception ex)
+			{
+				_logger.Warning(ex, "Failed to handle EventSub notification of type {SubscriptionType}", metadata.SubscriptionType);
+			}
+		}
 		private async Task EnsureConnectionKeepAliveSubscription()
 		{
 			if (!_channelSubscriptionIds.IsEmpty || _loggedInUser == null || _sessionId == null)
@@ -1009,6 +1333,12 @@ namespace CatCore.Services.Twitch
 					HandleRewardRedeem(rawMessage);
 					break;
 				default:
+					if (_eventSubHub.CanHandle(metadata.SubscriptionType, metadata.SubscriptionVersion))
+					{
+						HandleOptionalEventSubNotification(metadata, rawMessage);
+						break;
+					}
+
 					_logger.Verbose("Received unknown subscription type: {SubscriptionType}", metadata.SubscriptionType);
 					break;
 			}
@@ -2192,6 +2522,15 @@ namespace CatCore.Services.Twitch
 				if (channelId is { Length: > 0 } && _channelSubscriptionIds.TryGetValue(channelId, out var subscriptionIds))
 				{
 					ReplaceTrackedSubscriptionIdsLocked(channelId, subscriptionIds, subscriptionId);
+					ReplaceTrackedOptionalSubscriptionIdsLocked(channelId, subscriptionId);
+					ReleaseSubscriptionCost(subscriptionId);
+					return;
+				}
+
+				if (channelId is { Length: > 0 } && _optionalChannelSubscriptionIds.TryGetValue(channelId, out var optionalSubscriptionIds))
+				{
+					ReplaceTrackedOptionalSubscriptionIdsLocked(channelId, subscriptionId);
+					ReleaseSubscriptionCost(subscriptionId);
 					return;
 				}
 
@@ -2205,6 +2544,20 @@ namespace CatCore.Services.Twitch
 					}
 
 					ReplaceTrackedSubscriptionIdsLocked(trackedChannel.Key, trackedChannel.Value, subscriptionId);
+					ReplaceTrackedOptionalSubscriptionIdsLocked(trackedChannel.Key, subscriptionId);
+					ReleaseSubscriptionCost(subscriptionId);
+					return;
+				}
+
+				foreach (var trackedChannel in _optionalChannelSubscriptionIds)
+				{
+					if (!trackedChannel.Value.Contains(subscriptionId, StringComparer.Ordinal))
+					{
+						continue;
+					}
+
+					ReplaceTrackedOptionalSubscriptionIdsLocked(trackedChannel.Key, subscriptionId);
+					ReleaseSubscriptionCost(subscriptionId);
 					return;
 				}
 			}
@@ -2227,13 +2580,38 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
+		private void ReplaceTrackedOptionalSubscriptionIdsLocked(string channelId, string removedSubscriptionId)
+		{
+			if (!_optionalChannelSubscriptionIds.TryGetValue(channelId, out var optionalSubscriptionIds))
+			{
+				return;
+			}
+
+			var remainingSubscriptionIds = optionalSubscriptionIds
+				.Where(id => !string.Equals(id, removedSubscriptionId, StringComparison.Ordinal))
+				.ToList();
+
+			if (remainingSubscriptionIds.Count == 0)
+			{
+				_optionalChannelSubscriptionIds.TryRemove(channelId, out _);
+				_optionalChannelSubscriptionSessionIds.TryRemove(channelId, out _);
+			}
+			else
+			{
+				_optionalChannelSubscriptionIds[channelId] = remainingSubscriptionIds;
+			}
+		}
+
 		private async Task DetachChannelAsync(string channelId)
 		{
 			List<string>? remainingSubscriptionIds;
+			List<string>? remainingOptionalSubscriptionIds;
 			await _subscriptionManagementSemaphoreSlim.WaitAsync().ConfigureAwait(false);
 			try
 			{
 				_channelSubscriptionIds.TryRemove(channelId, out remainingSubscriptionIds);
+				_optionalChannelSubscriptionIds.TryRemove(channelId, out remainingOptionalSubscriptionIds);
+				_optionalChannelSubscriptionSessionIds.TryRemove(channelId, out _);
 				_channelFailedSubscriptionTypes.TryRemove(channelId, out _);
 			}
 			finally
@@ -2246,6 +2624,16 @@ namespace CatCore.Services.Twitch
 				foreach (var subscriptionId in remainingSubscriptionIds)
 				{
 					await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
+					ReleaseSubscriptionCost(subscriptionId);
+				}
+			}
+
+			if (remainingOptionalSubscriptionIds != null)
+			{
+				foreach (var subscriptionId in remainingOptionalSubscriptionIds)
+				{
+					await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
+					ReleaseSubscriptionCost(subscriptionId);
 				}
 			}
 
@@ -2285,6 +2673,16 @@ namespace CatCore.Services.Twitch
 
 				await SubscribeToChannelInternal(channelId, channelName).ConfigureAwait(false);
 			}
+
+			// The optional EventSub types are created after the chat subscriptions of every channel:
+			// they are the first ones to hit the Twitch subscription cost limit, and the chat
+			// subscriptions must not be affected by that.
+			foreach (var channelId in channelIds)
+			{
+				await SubscribeToOptionalChannelEventTypesInternal(channelId).ConfigureAwait(false);
+			}
+
+			await SubscribeToUserEventTypesInternal().ConfigureAwait(false);
 		}
 
 		private async Task SubscribeToChannelInternal(string channelId, string channelName, bool forceResubscribe = false)
@@ -2344,14 +2742,34 @@ namespace CatCore.Services.Twitch
 				(SUB_TYPE_CHANNEL_REWARD_REDEEM, EVENTSUB_VERSION, new Dictionary<string, string> { { "broadcaster_user_id", channelId } })
 			};
 
+			// The previous subscriptions of this channel are deleted first, so that the cost budget
+			// reflects the subscriptions that are actually active.
+			if (_channelSubscriptionIds.TryRemove(channelId, out var previousSubscriptionIds))
+			{
+				foreach (var previousId in previousSubscriptionIds)
+				{
+					await _twitchHelixApiService.DeleteEventSubSubscription(previousId).ConfigureAwait(false);
+					ReleaseSubscriptionCost(previousId);
+				}
+			}
+
 			var subscriptionIds = new List<string>();
 			var failedTypes = new List<string>();
 			foreach (var request in subscriptionRequests)
 			{
+				var cost = CalculateSubscriptionCost(RequiresUserAuthorization(request.type), request.condition, loggedInUserId);
+				if (Interlocked.Add(ref _estimatedSubscriptionCost, 0) + cost > MAX_EVENTSUB_SUBSCRIPTION_COST)
+				{
+					_logger.Warning("Skipping EventSub subscription type {SubscriptionType} for channel {ChannelId}: the Twitch subscription cost limit would be exceeded",
+						request.type, channelId);
+					continue;
+				}
+
 				var subscriptionId = await _twitchHelixApiService.CreateEventSubSubscription(request.type, request.version, request.condition, _sessionId).ConfigureAwait(false);
 				if (subscriptionId != null)
 				{
 					subscriptionIds.Add(subscriptionId);
+					TrackSubscriptionCost(subscriptionId, cost);
 				}
 				else
 				{
@@ -2362,16 +2780,8 @@ namespace CatCore.Services.Twitch
 
 			if (subscriptionIds.Count > 0)
 			{
-				// Replace existing subscriptions with the successfully created set.
+				// Track the successfully created set; the previous ones were already deleted above.
 				// Some EventSub types may fail due to missing optional scopes, but chat should remain functional.
-				if (_channelSubscriptionIds.TryRemove(channelId, out var existingSubscriptionIds))
-				{
-					foreach (var existingId in existingSubscriptionIds)
-					{
-						await _twitchHelixApiService.DeleteEventSubSubscription(existingId).ConfigureAwait(false);
-					}
-				}
-
 				_channelSubscriptionIds[channelId] = subscriptionIds;
 				_subscriptionSessionId = _sessionId;
 
@@ -2660,6 +3070,16 @@ namespace CatCore.Services.Twitch
 		{
 			_channelFailedSubscriptionTypes.TryRemove(channelId, out _);
 
+			if (_optionalChannelSubscriptionIds.TryRemove(channelId, out var optionalSubscriptionIds))
+			{
+				_optionalChannelSubscriptionSessionIds.TryRemove(channelId, out _);
+				foreach (var subscriptionId in optionalSubscriptionIds)
+				{
+					await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
+					ReleaseSubscriptionCost(subscriptionId);
+				}
+			}
+
 			if (!_channelSubscriptionIds.TryRemove(channelId, out var subscriptionIds))
 			{
 				return;
@@ -2668,6 +3088,7 @@ namespace CatCore.Services.Twitch
 			foreach (var subscriptionId in subscriptionIds)
 			{
 				await _twitchHelixApiService.DeleteEventSubSubscription(subscriptionId).ConfigureAwait(false);
+				ReleaseSubscriptionCost(subscriptionId);
 			}
 
 			// Prefer the name supplied by ChannelsUpdated: looking it up in the configuration does not work

@@ -26,6 +26,64 @@ CatCore is documented using XML docs, which are provided in the release zip as w
 It will cover several subjects, including but not limited to, performance benchmarks, configuration, et cetera. However, please keep in mind that this is still a work in progress.
 
 
+### Twitch EventSub events
+
+Besides the legacy chat events, CatCore subscribes to the EventSub subscription types of Twitch and exposes them through `ITwitchService.GetEventSubService()`.
+The returned service is split into the following event families, each of which exposes its own events:
+
+| Family | Subscription types |
+| --- | --- |
+| `HypeTrain` | `channel.hype_train.begin` / `.progress` / `.end` |
+| `Goal` | `channel.goal.begin` / `.progress` / `.end` |
+| `Charity` | `channel.charity_campaign.donate` / `.progress` / `.start` / `.stop` |
+| `User` | `user.update`, `user.whisper.message` |
+| `Subscriptions` | `channel.subscribe`, `channel.subscription.end` / `.gift` / `.message`, `channel.vip.add` / `.remove` |
+| `ChannelActivity` | `channel.bits.use`, `channel.cheer`, `channel.custom_power_up_redemption.add`, `channel.raid`, `channel.update`, `channel.shoutout.create` / `.receive` |
+| `Moderation` | `channel.ban`, `channel.unban`, `channel.moderate`, `channel.moderator.add` / `.remove`, `channel.shield_mode.begin` / `.end` |
+| `ChannelPoints` | `channel.channel_points_automatic_reward_redemption.add`, `channel.channel_points_custom_reward_redemption.update`, `channel.channel_points_custom_reward.add` / `.remove` / `.update` |
+| `AutoMod` | `automod.message.hold` / `.update`, `automod.settings.update`, `automod.terms.update`, `channel.chat.user_message_hold` / `.update` |
+| `Safety` | `channel.suspicious_user.message` / `.update`, `channel.unban_request.create` / `.resolve`, `channel.warning.send` / `.acknowledge` |
+
+Most of these subscription types require additional OAuth scopes. Those scopes are requested when you log in, but a token that is missing them stays valid: the matching subscriptions are then simply not created.
+Because Twitch limits the total subscription cost of a WebSocket connection, the subscriptions that are billed are created last, so that the chat subscriptions always take priority.
+
+
+## FAQ
+
+### What does "subscription cost" mean? Does Twitch charge me for this?
+
+No, Twitch does not bill you anything. EventSub uses a cost-based quota: every subscription has a cost that counts against `max_total_cost`, which is **10 for a WebSocket connection** (counted per client id and user id). Once the quota is used up, Twitch rejects further subscriptions with an HTTP 400, and CatCore logs a warning and skips them.
+
+### Is the cost always 0 once my app is authorized?
+
+Partly. The cost is evaluated per subscription, based on the user referenced by its condition:
+
+- Subscriptions whose type requires that user to authorize your app cost **0** (without the grant they cannot be created at all).
+- Subscriptions whose type does not require an authorization (e.g. `stream.online`, `channel.update`) cost **1**, unless that user has authorized your app with *any* OAuth scope, in which case they cost 0 as well.
+
+So a single grant from a user makes every subscription that references that user free, but it does not make subscriptions that reference *other* users free.
+
+### I'm the only user and I only watch my own channel. Do I have to care about the limit?
+
+No. The user of the condition is always you, so every subscription costs 0 and the limit of 10 is never reached. All supported subscription types are created, including the ones that are otherwise billed.
+
+### Why are `channel.update` or `channel.raid` missing on my additional channels?
+
+Every additional channel whose broadcaster has not authorized CatCore consumes up to 4 cost (`stream.online`, `stream.offline`, `channel.update`, `channel.raid`), so the limit of 10 leaves room for roughly two such channels. CatCore creates the chat subscriptions of every channel first and the billed ones afterwards, so only the optional `channel.update` and `channel.raid` subscriptions of the later channels are skipped, together with a warning in the log. Chat and all authorization-gated families are unaffected.
+
+### Do I need to log in again after updating CatCore?
+
+Only to receive the new event families. The additional OAuth scopes are requested the next time you log in. An existing token stays valid and CatCore simply does not create the subscriptions whose scopes are missing, so nothing breaks until you re-authorize.
+
+### Which EventSub subscription types are not supported?
+
+Shared chat (`channel.shared_chat.*`), Conduit (`conduit.shard.disabled`), Drop (`drop.entitlement.grant`), Extensions (`extension.bits_transaction.create`), Guest Star (`channel.guest_star_*`) and `user.authorization.grant` / `user.authorization.revoke`.
+
+### Why do moderator-scoped events only arrive when I'm a moderator of the channel?
+
+Types such as `channel.moderate` or `channel.shield_mode.*` require the `moderator_user_id` of the condition to be the user of the token, and that user has to be a moderator (or the broadcaster) of the channel. CatCore subscribes with your logged-in account as the moderator, so these events only arrive for channels where that account has the required permissions. Twitch rejects the subscription otherwise, which CatCore logs and ignores.
+
+
 ## Origin and name
 
 **CatCore** is the spiritual successor to ChatCore, a library made that is/was used by several Beat Saber mods in order to interact with Twitch (it did support Mixer as well, but only starting roughly 1 month before it got shut down.)
