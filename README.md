@@ -20,6 +20,30 @@ The installation is fairly simple.
 5) We're done, you should have set it up correctly now ^^
 
 
+### Authentication
+
+CatCore never contains a Twitch client secret. The normal login flow sends the authorization code to
+the CatCore sign-in service, which is the only place that holds the secret and exchanges it for tokens.
+
+If that service cannot be reached, CatCore falls back to Twitch's
+[device code grant flow](https://dev.twitch.tv/docs/authentication/getting-tokens-oauth/#device-code-grant-flow).
+This is a public client flow that only needs the (public) client id, so no secret has to be embedded in
+the library or sent to a server:
+
+- **Login on Twitch** redirects straight to Twitch's activation page, where the login is approved.
+- The token pair is obtained directly from Twitch and stored locally, like any other CatCore credential.
+- Tokens obtained this way are refreshed locally against Twitch without a client secret, so CatCore keeps
+  working while the sign-in service is unavailable. Twitch expires these refresh tokens after 30 days
+  without use; CatCore refreshes the access token shortly before it expires, so this only matters while
+  CatCore is not running at all.
+- The portal shows the login code, and once you return to the portal it picks up the completed login
+  automatically, without a second click.
+
+Tokens that were obtained through the sign-in service before the fallback stay valid. When the service is
+unreachable, CatCore also tries to refresh those locally; if Twitch rejects that (because they belong to
+the confidential client), log in once more to switch to a locally refreshable token.
+
+
 ## Documentation
 
 CatCore is documented using XML docs, which are provided in the release zip as well. However, documentation and information covering several subjects will also be added to [the CatCore wiki](https://github.com/ErisApps/CatCore/wiki).

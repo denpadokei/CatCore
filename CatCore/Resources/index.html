@@ -72,6 +72,84 @@
 		.global-spinner-color {
 			border-color: #757575;
 		}
+
+		/* Local (device code) Twitch authorization fallback */
+		.local-authorization-card {
+			background-color: #f4f0fb;
+			border-left: 4px solid #6441A4;
+			border-radius: 4px;
+			padding: 0.75rem 1rem;
+			margin: 0;
+		}
+
+		.local-authorization-title {
+			display: flex;
+			align-items: center;
+			font-weight: 600;
+			color: #3b2d5c;
+			margin: 0;
+		}
+
+		.local-authorization-title .material-icons {
+			margin-right: 0.4rem;
+			font-size: 1.2rem;
+		}
+
+		.local-authorization-text {
+			margin: 0.5rem 0 0;
+			font-size: 0.9rem;
+			line-height: 1.45;
+			color: #4a4a4a;
+		}
+
+		.local-authorization-actions {
+			display: flex;
+			flex-wrap: wrap;
+			align-items: center;
+			margin-top: 0.75rem;
+		}
+
+		.local-authorization-code {
+			font-family: Consolas, 'Liberation Mono', Menlo, monospace;
+			font-size: 1.35rem;
+			font-weight: 700;
+			letter-spacing: 0.18rem;
+			color: #1a1a1a;
+			background-color: #ffffff;
+			border: 1px dashed #b39ddb;
+			border-radius: 4px;
+			padding: 0.35rem 0.65rem;
+			cursor: pointer;
+			user-select: all;
+		}
+
+		.local-authorization-code:focus {
+			outline: 2px solid #6441A4;
+			outline-offset: 2px;
+		}
+
+		.local-authorization-link {
+			color: #6441A4;
+			font-weight: 500;
+			margin-left: 1rem;
+		}
+
+		.local-authorization-link:hover,
+		.local-authorization-link:focus {
+			text-decoration: underline;
+		}
+
+		.local-authorization-link .material-icons {
+			font-size: 1.1rem;
+			vertical-align: middle;
+		}
+
+		.local-authorization-status {
+			margin: 0.65rem 0 0;
+			font-size: 0.8rem;
+			line-height: 1.4;
+			color: #5a5a5a;
+		}
 	</style>
 </head>
 <body class="grey lighten-3" style="height: 100%; min-height: 100%">
@@ -124,6 +202,37 @@
 							   href="/api/twitch/logout">
 								Logout from Twitch
 							</a>
+						</div>
+
+						<div id="twitch-local-authorization-panel" class="row hide">
+							<div class="col s12">
+								<div class="local-authorization-card">
+									<p class="local-authorization-title">
+										<i class="material-icons">vpn_key</i>
+										Twitch login in progress
+									</p>
+									<p class="local-authorization-text">
+										CatCore could not reach its sign-in service, so it started a code-based Twitch login instead.
+										Open the Twitch activation page, approve the login there, and then come back to this page —
+										it will show your channels once you're signed in.
+									</p>
+									<div class="local-authorization-actions">
+										<code id="twitch-local-authorization-code" class="local-authorization-code"
+										      tabindex="0" title="Click to copy the code"
+										      aria-label="Twitch login code. Click to copy it."
+										      onclick="CopyLocalAuthorizationCode()">--------</code>
+										<a id="twitch-local-authorization-link" class="local-authorization-link"
+										   href="#" target="_blank" rel="noopener noreferrer">
+											Open the Twitch activation page
+											<i class="material-icons">open_in_new</i>
+										</a>
+									</div>
+									<p id="twitch-local-authorization-status" class="local-authorization-status">
+										Waiting for you to approve the login on Twitch. Click the code to copy it.
+										Once you're back on this page, it will show your channels automatically.
+									</p>
+								</div>
+							</div>
 						</div>
 
 						<div class="row">
@@ -442,6 +551,30 @@
 		const twitchLoadingSpinner = document.getElementById("twitch-loading-spinner");
 		twitchLoadingSpinner.style.visibility = "visible"
 
+		try {
+			const response = await fetch("/api/twitch/state");
+			const body = await response.json();
+
+			ApplyTwitchState(body, true);
+
+			ApplyLocalAuthorizationState(body);
+			if (IsLocalAuthorizationPending(body) && body["LoggedIn"] !== true) {
+				StartLocalAuthorizationPolling();
+			} else {
+				StopLocalAuthorizationPolling();
+			}
+		} catch (ex) {
+			M.toast({html: "Something went wrong while trying to load the Twitch settings."});
+			console.error(ex);
+		} finally {
+			twitchLoadingSpinner.style.visibility = "collapse"
+		}
+	}
+
+	// Applies the state returned by /api/twitch/state to the page.
+	// `applySettings` controls whether the settings inputs (checkboxes etc.) are
+	// (re)filled, so polling does not overwrite changes that were not saved yet.
+	function ApplyTwitchState(body, applySettings) {
 		function GenerateOwnTwitchChannel(channel, isEnabled) {
 			return `<li class="collection-item avatar">
 						<img src="${channel.ThumbnailUrl}" alt="${channel.DisplayName}'s profile picture" class="circle z-depth-1">
@@ -459,42 +592,143 @@
 					</li>`;
 		}
 
+		if (body["LoggedIn"] === true) {
+			document.getElementById("twitch-login-button").classList.add("hide");
+			document.getElementById("twitch-logout-button").classList.remove("hide");
+
+			document.getElementById("twitch-channels-container-notloggedin").classList.add("hide")
+			document.getElementById("twitch-channels-container").classList.remove("hide")
+		} else {
+			document.getElementById("twitch-login-button").classList.remove("hide");
+			document.getElementById("twitch-logout-button").classList.add("hide");
+
+			document.getElementById("twitch-channels-container-notloggedin").classList.remove("hide")
+			document.getElementById("twitch-channels-container").classList.add("hide")
+		}
+
+		let twitchChannelsHtml = "";
+		twitchChannelData = body["ChannelData"] || [];
+		for (const channel of twitchChannelData) {
+			if (channel["IsSelf"] === true) {
+				twitchChannelsHtml += GenerateOwnTwitchChannel(channel, body["OwnChannelEnabled"]);
+			} else {
+				twitchChannelsHtml += GenerateAdditionalTwitchChannel(channel);
+			}
+		}
+
+		document.getElementById("twitch-channels").innerHTML = twitchChannelsHtml;
+
+		if (applySettings === true) {
+			HandleStateResponse(body);
+		}
+	}
+
+	// Local (device code) Twitch authorization fallback
+	const localAuthorizationPollIntervalMs = 3000;
+	const localAuthorizationMaxPollFailures = 5;
+	let localAuthorizationPollTimer = null;
+	let localAuthorizationPollFailures = 0;
+
+	function IsEmptyString(value) {
+		return value === null || value === undefined || String(value).trim().length === 0;
+	}
+
+	function IsLocalAuthorizationPending(body) {
+		return body["LocalAuthorizationPending"] === true;
+	}
+
+	function ApplyLocalAuthorizationState(body) {
+		const panel = document.getElementById("twitch-local-authorization-panel");
+		const code = body["LocalAuthorizationUserCode"];
+		const verificationUri = body["LocalAuthorizationVerificationUri"];
+
+		const shouldShow = IsLocalAuthorizationPending(body)
+			&& body["LoggedIn"] !== true
+			&& !IsEmptyString(code)
+			&& !IsEmptyString(verificationUri);
+
+		if (!shouldShow) {
+			panel.classList.add("hide");
+			return;
+		}
+
+		document.getElementById("twitch-local-authorization-code").textContent = code;
+		document.getElementById("twitch-local-authorization-link").href = verificationUri;
+		panel.classList.remove("hide");
+	}
+
+	function CopyLocalAuthorizationCode() {
+		const codeElement = document.getElementById("twitch-local-authorization-code");
+		const code = codeElement.textContent;
+
+		if (navigator.clipboard && navigator.clipboard.writeText) {
+			navigator.clipboard.writeText(code).catch(() => SelectLocalAuthorizationCode(codeElement));
+		} else {
+			SelectLocalAuthorizationCode(codeElement);
+		}
+	}
+
+	function SelectLocalAuthorizationCode(codeElement) {
+		if (document.createRange && window.getSelection) {
+			const range = document.createRange();
+			range.selectNodeContents(codeElement);
+			const selection = window.getSelection();
+			selection.removeAllRanges();
+			selection.addRange(range);
+		}
+	}
+
+	function StopLocalAuthorizationPolling() {
+		if (localAuthorizationPollTimer !== null) {
+			clearTimeout(localAuthorizationPollTimer);
+			localAuthorizationPollTimer = null;
+		}
+	}
+
+	function StartLocalAuthorizationPolling() {
+		// Never stack pollers: a single chain of timeouts is used instead of an interval.
+		if (localAuthorizationPollTimer !== null) {
+			return;
+		}
+
+		localAuthorizationPollFailures = 0;
+		ScheduleLocalAuthorizationPoll();
+	}
+
+	function ScheduleLocalAuthorizationPoll() {
+		StopLocalAuthorizationPolling();
+		localAuthorizationPollTimer = setTimeout(PollTwitchStateForAuthorization, localAuthorizationPollIntervalMs);
+	}
+
+	async function PollTwitchStateForAuthorization() {
+		localAuthorizationPollTimer = null;
+
 		try {
 			const response = await fetch("/api/twitch/state");
 			const body = await response.json();
 
-			if (body["LoggedIn"] === true) {
-				document.getElementById("twitch-login-button").classList.add("hide");
-				document.getElementById("twitch-logout-button").classList.remove("hide");
+			localAuthorizationPollFailures = 0;
 
-				document.getElementById("twitch-channels-container-notloggedin").classList.add("hide")
-				document.getElementById("twitch-channels-container").classList.remove("hide")
+			ApplyTwitchState(body, false);
+			ApplyLocalAuthorizationState(body);
+
+			if (IsLocalAuthorizationPending(body) && body["LoggedIn"] !== true) {
+				ScheduleLocalAuthorizationPoll();
 			} else {
-				document.getElementById("twitch-login-button").classList.remove("hide");
-				document.getElementById("twitch-logout-button").classList.add("hide");
-
-				document.getElementById("twitch-channels-container-notloggedin").classList.remove("hide")
-				document.getElementById("twitch-channels-container").classList.add("hide")
+				StopLocalAuthorizationPolling();
 			}
-
-			let twitchChannelsHtml = "";
-			twitchChannelData = body["ChannelData"];
-			for (const channel of twitchChannelData) {
-				if (channel["IsSelf"] === true) {
-					twitchChannelsHtml += GenerateOwnTwitchChannel(channel, body["OwnChannelEnabled"]);
-				} else {
-					twitchChannelsHtml += GenerateAdditionalTwitchChannel(channel);
-				}
-			}
-
-			document.getElementById("twitch-channels").innerHTML = twitchChannelsHtml;
-
-			HandleStateResponse(body);
 		} catch (ex) {
-			M.toast({html: "Something went wrong while trying to load the Twitch settings."});
+			localAuthorizationPollFailures++;
 			console.error(ex);
-		} finally {
-			twitchLoadingSpinner.style.visibility = "collapse"
+
+			if (localAuthorizationPollFailures >= localAuthorizationMaxPollFailures) {
+				StopLocalAuthorizationPolling();
+				document.getElementById("twitch-local-authorization-status").textContent =
+					"This page lost contact with CatCore and stopped checking for the login. " +
+					"Approve the login on Twitch and reload the page to continue.";
+			} else {
+				ScheduleLocalAuthorizationPoll();
+			}
 		}
 	}
 
