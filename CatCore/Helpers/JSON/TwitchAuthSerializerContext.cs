@@ -6,6 +6,8 @@ namespace CatCore.Helpers.JSON
 {
 	[JsonSerializable(typeof(ValidationResponse))]
 	[JsonSerializable(typeof(AuthorizationResponse))]
+	[JsonSerializable(typeof(DeviceAuthorizationResponse))]
+	[JsonSerializable(typeof(OAuthErrorResponse))]
 	internal partial class TwitchAuthSerializerContext : JsonSerializerContext
 	{
 	}

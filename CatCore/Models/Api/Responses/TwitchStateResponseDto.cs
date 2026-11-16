@@ -1,4 +1,5 @@
-﻿using System.Collections.Generic;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
 using CatCore.Models.Config;
 using CatCore.Models.Twitch.Helix.Responses;
@@ -18,7 +19,13 @@ namespace CatCore.Models.Api.Responses
 		public bool ParseTwitchEmotes { get; }
 		public bool ParseCheermotes { get; }
 
-		public TwitchStateResponseDto(bool isValid, ValidationResponse? loggedInUser, IEnumerable<UserData>? channelData, TwitchConfig twitchConfig)
+		public bool LocalAuthorizationPending { get; }
+		public string? LocalAuthorizationUserCode { get; }
+		public string? LocalAuthorizationVerificationUri { get; }
+		public DateTimeOffset? LocalAuthorizationExpiresAt { get; }
+
+		public TwitchStateResponseDto(bool isValid, ValidationResponse? loggedInUser, IEnumerable<UserData>? channelData, TwitchConfig twitchConfig,
+			TwitchDeviceAuthorizationInfo? pendingDeviceAuthorization = null)
 		{
 			LoggedIn = isValid;
 
@@ -33,6 +40,11 @@ namespace CatCore.Models.Api.Responses
 			ParseFfzEmotes = twitchConfig.ParseFfzEmotes;
 			ParseTwitchEmotes = twitchConfig.ParseTwitchEmotes;
 			ParseCheermotes = twitchConfig.ParseCheermotes;
+
+			LocalAuthorizationPending = pendingDeviceAuthorization != null;
+			LocalAuthorizationUserCode = pendingDeviceAuthorization?.UserCode;
+			LocalAuthorizationVerificationUri = pendingDeviceAuthorization?.VerificationUri;
+			LocalAuthorizationExpiresAt = pendingDeviceAuthorization?.ExpiresAt;
 		}
 	}
 }

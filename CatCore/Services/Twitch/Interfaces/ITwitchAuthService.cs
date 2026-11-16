@@ -15,12 +15,19 @@ namespace CatCore.Services.Twitch.Interfaces
 		event Action? OnCredentialsChanged;
 		event Action<AuthenticationStatus>? OnAuthenticationStatusChanged;
 
+		/// <summary>
+		/// Information about an in-progress local device code authorization, or <c>null</c>
+		/// when no such authorization is pending.
+		/// </summary>
+		TwitchDeviceAuthorizationInfo? PendingDeviceAuthorization { get; }
+
 		void Initialize();
 		ValidationResponse? FetchLoggedInUserInfo();
 		Task<ValidationResponse?> FetchLoggedInUserInfoWithRefresh();
 
 		string AuthorizationUrl(string redirectUrl);
-		Task GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl);
+		Task<string> GetLoginUrl(string redirectUrl);
+		Task<string?> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl);
 		Task<ValidationResponse?> ValidateAccessToken(TwitchCredentials credentials, bool resetDataOnFailure = true);
 		Task<bool> RefreshTokens(bool force = false);
 		Task<bool> RevokeTokens();

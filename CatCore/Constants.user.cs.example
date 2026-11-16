@@ -3,6 +3,11 @@
 	internal sealed partial class Constants
 	{
 		// Implement/Add the missing properties in this file.
+		// CATCORE_AUTH_SERVER_URI points to the CatCore auth back-end, which is the only place
+		// that holds the Twitch client secret. Leave it empty to always authorize and refresh
+		// tokens locally through Twitch's device code grant flow.
+		// Never put the Twitch client secret in this file: CatCore is distributed to end users,
+		// so a secret embedded here is not a secret anymore.
 		private const string CATCORE_AUTH_SERVER_URI = " {{ CATCORE_AUTH_SERVER_URI }} ";
 
 		private const string TWITCH_CLIENT_ID = " {{ TWITCH_CLIENT_ID }} ";

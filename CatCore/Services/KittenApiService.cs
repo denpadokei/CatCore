@@ -145,7 +145,9 @@ namespace CatCore.Services
 			switch (request.Url.Segments.ElementAtOrDefault(3))
 			{
 				case "login" when request.HttpMethod == "GET":
-					response.Redirect(_twitchAuthService.AuthorizationUrl($"{request.Url.GetLeftPart(UriPartial.Authority)}/api/twitch/authcode_callback"));
+					response.Redirect(await _twitchAuthService
+						.GetLoginUrl($"{request.Url.GetLeftPart(UriPartial.Authority)}/api/twitch/authcode_callback")
+						.ConfigureAwait(false));
 					return true;
 				case "authcode_callback" when request.HttpMethod == "GET":
 					string? code = null;
@@ -159,12 +161,15 @@ namespace CatCore.Services
 						}
 					}
 
+					string? postAuthorizationRedirectUri = null;
 					if (code != null)
 					{
-						await _twitchAuthService.GetTokensByAuthorizationCode(code, request.Url.GetLeftPart(UriPartial.Path)).ConfigureAwait(false);
+						postAuthorizationRedirectUri = await _twitchAuthService
+							.GetTokensByAuthorizationCode(code, request.Url.GetLeftPart(UriPartial.Path))
+							.ConfigureAwait(false);
 					}
 
-					response.Redirect(request.Url.GetLeftPart(UriPartial.Authority));
+					response.Redirect(postAuthorizationRedirectUri ?? request.Url.GetLeftPart(UriPartial.Authority));
 
 					return true;
 				case "logout" when request.HttpMethod == "GET":
@@ -183,7 +188,8 @@ namespace CatCore.Services
 						: null;
 
 					await JsonSerializer
-						.SerializeAsync(response.OutputStream, new TwitchStateResponseDto(_twitchAuthService.TokenIsValid, loggedInUserInfo, userInfos, _settingsService.Config.TwitchConfig))
+						.SerializeAsync(response.OutputStream, new TwitchStateResponseDto(_twitchAuthService.TokenIsValid, loggedInUserInfo, userInfos, _settingsService.Config.TwitchConfig,
+							_twitchAuthService.PendingDeviceAuthorization))
 						.ConfigureAwait(false);
 
 					return true;
