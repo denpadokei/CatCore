@@ -151,13 +151,27 @@ namespace CatCore.Services
 					return true;
 				case "authcode_callback" when request.HttpMethod == "GET":
 					string? code = null;
-					foreach (var parameterPair in request.Url.Query.Substring(1).Split(new[] {'&'}, StringSplitOptions.RemoveEmptyEntries))
+					string? state = null;
+					var queryString = request.Url.Query;
+					if (!string.IsNullOrEmpty(queryString))
 					{
-						var kvp = parameterPair.Split('=');
-						if (kvp[0] == "code")
+						foreach (var parameterPair in queryString.Substring(1).Split(new[] {'&'}, StringSplitOptions.RemoveEmptyEntries))
 						{
-							code = kvp[1];
-							break;
+							var kvp = parameterPair.Split('=');
+							if (kvp.Length < 2)
+							{
+								continue;
+							}
+
+							switch (kvp[0])
+							{
+								case "code":
+									code = kvp[1];
+									break;
+								case "state":
+									state = kvp[1];
+									break;
+							}
 						}
 					}
 
@@ -165,7 +179,7 @@ namespace CatCore.Services
 					if (code != null)
 					{
 						postAuthorizationRedirectUri = await _twitchAuthService
-							.GetTokensByAuthorizationCode(code, request.Url.GetLeftPart(UriPartial.Path))
+							.GetTokensByAuthorizationCode(code, request.Url.GetLeftPart(UriPartial.Path), state)
 							.ConfigureAwait(false);
 					}
 
@@ -182,14 +196,20 @@ namespace CatCore.Services
 					response.ContentEncoding = Encoding.UTF8;
 					response.ContentType = "application/json";
 
-					var loggedInUserInfo = await _twitchAuthService.FetchLoggedInUserInfoWithRefresh().ConfigureAwait(false);
+					var pendingDeviceAuthorization = _twitchAuthService.PendingDeviceAuthorization;
+					// Do not validate or refresh the old token pair while a device login is pending:
+					// the portal polls this endpoint every few seconds and must not trigger a
+					// validate + refresh cycle (including the back-end timeout) on every poll.
+					var loggedInUserInfo = pendingDeviceAuthorization != null
+						? _twitchAuthService.FetchLoggedInUserInfo()
+						: await _twitchAuthService.FetchLoggedInUserInfoWithRefresh().ConfigureAwait(false);
 					var userInfos = loggedInUserInfo != null
 						? await _twitchChannelManagementService.GetAllChannelsEnriched().ConfigureAwait(false)
 						: null;
 
 					await JsonSerializer
 						.SerializeAsync(response.OutputStream, new TwitchStateResponseDto(_twitchAuthService.TokenIsValid, loggedInUserInfo, userInfos, _settingsService.Config.TwitchConfig,
-							_twitchAuthService.PendingDeviceAuthorization))
+							pendingDeviceAuthorization))
 						.ConfigureAwait(false);
 
 					return true;

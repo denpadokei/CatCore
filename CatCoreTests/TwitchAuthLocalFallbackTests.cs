@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using CatCore;
@@ -161,10 +162,200 @@ namespace CatCoreTests
 
 			try
 			{
-				var redirectUri = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/api/twitch/authcode_callback");
+				var authorizationUrl = authService.AuthorizationUrl("https://localhost/api/twitch/authcode_callback");
+				var state = ExtractState(authorizationUrl);
+				var redirectUri = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/api/twitch/authcode_callback", state);
 
 				redirectUri.Should().Be(DEVICE_VERIFICATION_URI);
 				authService.PendingDeviceAuthorization.Should().NotBeNull();
+			}
+			finally
+			{
+				await authService.RevokeTokens();
+			}
+		}
+
+		[Fact]
+		public async Task AuthorizationCallbackRejectsAMissingOrMismatchedState()
+		{
+			var handler = new StubHttpMessageHandler((_, _) => throw new InvalidOperationException("No HTTP request may be made when the OAuth state is invalid"));
+			var authService = CreateAuthService(handler);
+
+			var authorizationUrl = authService.AuthorizationUrl("https://localhost/callback");
+			var state = ExtractState(authorizationUrl);
+
+			var missingStateResult = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", null);
+
+			authorizationUrl = authService.AuthorizationUrl("https://localhost/callback");
+			var mismatchedStateResult = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", state + "0");
+
+			missingStateResult.Should().BeNull();
+			mismatchedStateResult.Should().BeNull();
+			handler.Requests.Should().BeEmpty();
+		}
+
+		[Fact]
+		public async Task AuthorizationCallbackAcceptsTheMatchingStateAndUsesAFormBody()
+		{
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					return JsonResponse(TokenJson("backend-access", "backend-refresh"));
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/validate", StringComparison.Ordinal))
+				{
+					return JsonResponse(ValidationJson());
+				}
+
+				return JsonResponse("{}");
+			});
+			var authService = CreateAuthService(handler);
+
+			var authorizationUrl = authService.AuthorizationUrl("https://localhost/callback");
+			var state = ExtractState(authorizationUrl);
+
+			var redirectUri = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", state);
+
+			redirectUri.Should().BeNull();
+			authService.AccessToken.Should().Be("backend-access");
+
+			var backendRequest = handler.Requests.Single(request => IsAuthBackendRequest(request));
+			backendRequest.RequestUri!.AbsolutePath.Should().Be("/auth/api/twitch/authorize");
+			backendRequest.RequestUri.Query.Should().NotContain("code=");
+
+			var backendRequestBody = handler.RequestBodies[handler.Requests.IndexOf(backendRequest)];
+			backendRequestBody.Should().Contain("code=code-1");
+			backendRequestBody.Should().Contain("redirect_uri=https%3A%2F%2Flocalhost%2Fcallback");
+		}
+
+		[Fact]
+		public async Task BackendRefreshUsesAFormBodyAndNeverPutsTheRefreshTokenInTheUrl()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddMinutes(-10), TwitchTokenSources.AuthBackend);
+
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					return JsonResponse(TokenJson("backend-access", "backend-refresh"));
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/validate", StringComparison.Ordinal))
+				{
+					return JsonResponse(ValidationJson());
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			var refreshed = await authService.RefreshTokens(force: true);
+
+			refreshed.Should().BeTrue();
+			authService.AccessToken.Should().Be("backend-access");
+
+			var backendRequest = handler.Requests.Single(request => IsAuthBackendRequest(request));
+			backendRequest.RequestUri!.AbsolutePath.Should().Be("/auth/api/twitch/refresh");
+			backendRequest.RequestUri.Query.Should().BeEmpty();
+
+			var backendRequestBody = handler.RequestBodies[handler.Requests.IndexOf(backendRequest)];
+			backendRequestBody.Should().Contain("refresh_token=old-refresh");
+			backendRequestBody.Should().NotContain("client_secret");
+
+			var storedCredentials = LoadStoredCredentials();
+			storedCredentials.RefreshToken.Should().Be("backend-refresh");
+			storedCredentials.TokenSource.Should().Be(TwitchTokenSources.AuthBackend);
+		}
+
+		[Fact]
+		public async Task BackendRefreshRetriesTransientTransportErrors()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddMinutes(-10), TwitchTokenSources.AuthBackend);
+
+			var backendRefreshAttempts = 0;
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					backendRefreshAttempts++;
+					if (backendRefreshAttempts == 1)
+					{
+						throw new HttpRequestException("transient transport error");
+					}
+
+					return JsonResponse(TokenJson("backend-access", "backend-refresh"));
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/validate", StringComparison.Ordinal))
+				{
+					return JsonResponse(ValidationJson());
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			var refreshed = await authService.RefreshTokens(force: true);
+
+			refreshed.Should().BeTrue();
+			backendRefreshAttempts.Should().Be(2);
+			authService.AccessToken.Should().Be("backend-access");
+		}
+
+		[Fact]
+		public async Task RevokeTokensUsesAFormBodyAndNeverPutsTheTokenInTheUrl()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddHours(1), TwitchTokenSources.LocalDeviceCode);
+
+			var handler = new StubHttpMessageHandler((request, _) =>
+				request.RequestUri!.AbsolutePath.EndsWith("/revoke", StringComparison.Ordinal)
+					? new HttpResponseMessage(HttpStatusCode.OK)
+					: new HttpResponseMessage(HttpStatusCode.OK));
+			var authService = CreateAuthService(handler);
+
+			var revoked = await authService.RevokeTokens();
+
+			revoked.Should().BeTrue();
+
+			var revokeRequest = handler.Requests.Single(request => request.RequestUri!.AbsolutePath.EndsWith("/revoke", StringComparison.Ordinal));
+			revokeRequest.RequestUri!.Query.Should().BeEmpty();
+
+			var revokeRequestBody = handler.RequestBodies[handler.Requests.IndexOf(revokeRequest)];
+			revokeRequestBody.Should().Contain("client_id=test-client-id");
+			revokeRequestBody.Should().Contain("token=old-refresh");
+			revokeRequestBody.Should().NotContain("client_secret");
+		}
+
+		[Theory]
+		[InlineData("https://evil.example/activate?public=true&device-code=ABCD1234")]
+		[InlineData("javascript:alert(1)")]
+		public async Task DeviceAuthorizationFallsBackToTheOfficialActivationUriForAnUntrustedVerificationUri(string verificationUri)
+		{
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					throw new HttpRequestException("The CatCore auth back-end is down");
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/device", StringComparison.Ordinal))
+				{
+					return JsonResponse(DeviceAuthorizationJson(verificationUri));
+				}
+
+				return JsonResponse("{}");
+			});
+			var authService = CreateAuthService(handler);
+
+			try
+			{
+				var loginUrl = await authService.GetLoginUrl("https://localhost/callback");
+
+				loginUrl.Should().Be(DEVICE_VERIFICATION_URI);
+				authService.PendingDeviceAuthorization.Should().NotBeNull();
+				authService.PendingDeviceAuthorization!.Value.VerificationUri.Should().Be(DEVICE_VERIFICATION_URI);
 			}
 			finally
 			{
@@ -251,7 +442,8 @@ namespace CatCoreTests
 
 			var backendRequest = handler.Requests.First(request => IsAuthBackendRequest(request));
 			backendRequest.RequestUri!.AbsolutePath.Should().Be("/auth/api/twitch/refresh");
-			backendRequest.RequestUri.Query.Should().Contain("refresh_token=old-refresh");
+			backendRequest.RequestUri.Query.Should().BeEmpty();
+			handler.RequestBodies[handler.Requests.IndexOf(backendRequest)].Should().Contain("refresh_token=old-refresh");
 
 			var storedCredentials = LoadStoredCredentials();
 			storedCredentials.RefreshToken.Should().Be("new-refresh");
@@ -353,6 +545,13 @@ namespace CatCoreTests
 			}
 		}
 
+		private static string ExtractState(string authorizationUrl)
+		{
+			var match = Regex.Match(authorizationUrl, "[?&]state=([0-9a-f]+)");
+			match.Success.Should().BeTrue();
+			return match.Groups[1].Value;
+		}
+
 		private TwitchAuthService CreateAuthService(StubHttpMessageHandler handler)
 		{
 			Directory.CreateDirectory(_dataPath);
@@ -384,13 +583,13 @@ namespace CatCoreTests
 			return string.Equals(request.RequestUri?.Host, AUTH_BACKEND_HOST, StringComparison.Ordinal);
 		}
 
-		private static string DeviceAuthorizationJson()
+		private static string DeviceAuthorizationJson(string verificationUri = DEVICE_VERIFICATION_URI)
 		{
 			return JsonSerializer.Serialize(new
 			{
 				device_code = "device-code-1",
 				user_code = "ABCD1234",
-				verification_uri = DEVICE_VERIFICATION_URI,
+				verification_uri = verificationUri,
 				expires_in = 900,
 				interval = 1
 			});

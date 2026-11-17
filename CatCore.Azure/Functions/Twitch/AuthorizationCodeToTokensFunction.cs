@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Threading.Tasks;
 using System.Web;
+using CatCore.Azure.Http;
 using CatCore.Azure.Services.Twitch;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -19,11 +20,12 @@ namespace CatCore.Azure.Functions.Twitch
 			var logger = executionContext.GetLogger(nameof(AuthorizationCodeToTokensFunction));
 
 			var queryParametersCollection = HttpUtility.ParseQueryString(req.Url.Query);
-			var authorizationCode = queryParametersCollection["code"];
-			var redirectUrl = queryParametersCollection["redirect_uri"];
+			var formParametersCollection = await req.ReadFormCollectionAsync().ConfigureAwait(false);
+			var authorizationCode = formParametersCollection["code"] ?? queryParametersCollection["code"];
+			var redirectUrl = formParametersCollection["redirect_uri"] ?? queryParametersCollection["redirect_uri"];
 			if (string.IsNullOrWhiteSpace(authorizationCode) || string.IsNullOrWhiteSpace(redirectUrl))
 			{
-				logger.LogInformation("API Call is missing one of the required query parameters");
+				logger.LogInformation("API Call is missing one of the required parameters");
 				return req.CreateResponse(HttpStatusCode.BadRequest);
 			}
 

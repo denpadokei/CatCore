@@ -27,7 +27,7 @@ namespace CatCore.Services.Twitch.Interfaces
 
 		string AuthorizationUrl(string redirectUrl);
 		Task<string> GetLoginUrl(string redirectUrl);
-		Task<string?> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl);
+		Task<string?> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl, string? state);
 		Task<ValidationResponse?> ValidateAccessToken(TwitchCredentials credentials, bool resetDataOnFailure = true);
 		Task<bool> RefreshTokens(bool force = false);
 		Task<bool> RevokeTokens();

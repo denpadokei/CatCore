@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Threading.Tasks;
 using System.Web;
+using CatCore.Azure.Http;
 using CatCore.Azure.Services.Twitch;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -19,10 +20,11 @@ namespace CatCore.Azure.Functions.Twitch
 			var logger = executionContext.GetLogger(nameof(RefreshTokensFunction));
 
 			var queryParametersCollection = HttpUtility.ParseQueryString(req.Url.Query);
-			var refreshToken = queryParametersCollection["refresh_token"];
+			var formParametersCollection = await req.ReadFormCollectionAsync().ConfigureAwait(false);
+			var refreshToken = formParametersCollection["refresh_token"] ?? queryParametersCollection["refresh_token"];
 			if (string.IsNullOrWhiteSpace(refreshToken))
 			{
-				logger.LogWarning("API Call is missing one of the required query parameters");
+				logger.LogWarning("API Call is missing one of the required parameters");
 				return req.CreateResponse(HttpStatusCode.BadRequest);
 			}
 

@@ -38,6 +38,12 @@ the library or sent to a server:
   CatCore is not running at all.
 - The portal shows the login code, and once you return to the portal it picks up the completed login
   automatically, without a second click.
+- The sign-in service receives the authorization code and refresh token in the POST body, not in the
+  request URL, so they do not end up in reverse-proxy or request-log URLs.
+
+> **Token storage:** CatCore stores the credentials as a JSON file in its data folder, protected only by
+> the permissions of your user account. Locally obtained refresh tokens can be renewed without a client
+> secret, so keep the data folder private and do not share it.
 
 Tokens that were obtained through the sign-in service before the fallback stay valid. When the service is
 unreachable, CatCore also tries to refresh those locally; if Twitch rejects that (because they belong to
