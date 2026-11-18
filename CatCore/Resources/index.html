@@ -9,6 +9,7 @@
 	<!--Let browser know website is optimized for mobile-->
 	<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 	<meta charset="UTF-8">
+	<meta id="catcore-csrf-token" name="catcore-csrf-token" content="{csrfToken}"/>
 	<style>
 		html, body {
 			height: 100%;
@@ -195,7 +196,7 @@
 						</div>
 						<div class="row">
 							<a id="twitch-login-button" class="waves-effect waves-light btn twitch-button"
-							   href="/api/twitch/login">
+							   href="#" onclick="LoginOnTwitch(event)">
 								Login on Twitch
 							</a>
 							<a id="twitch-logout-button" class="waves-effect waves-light btn red darken-1 hide"
@@ -672,11 +673,56 @@
 		panel.classList.remove("hide");
 	}
 
+	// Reads the per-startup CSRF token that CatCore injected into the page. State-changing
+	// POST requests must echo it back in the X-CSRF-Token header.
+	function GetCsrfToken() {
+		const metaElement = document.getElementById("catcore-csrf-token");
+		return (metaElement && metaElement.getAttribute("content")) || "";
+	}
+
+	async function LoginOnTwitch(event) {
+		event.preventDefault();
+
+		const loginButton = document.getElementById("twitch-login-button");
+		if (loginButton.classList.contains("disabled")) {
+			return;
+		}
+
+		loginButton.classList.add("disabled");
+
+		try {
+			const response = await fetch('/api/twitch/login', {
+				method: 'POST',
+				headers: {'X-CSRF-Token': GetCsrfToken()}
+			});
+
+			if (!response.ok) {
+				throw new Error("Login failed with status " + response.status);
+			}
+
+			const body = await response.json();
+			if (!body || !body["LoginUrl"]) {
+				throw new Error("The login response did not contain a login URL");
+			}
+
+			// The server answers with the login URL because the browser cannot follow a
+			// cross-origin redirect to Twitch from a fetch request.
+			window.location.href = body["LoginUrl"];
+		} catch (ex) {
+			loginButton.classList.remove("disabled");
+			M.toast({html: "Could not start the Twitch login. Please try again."});
+			console.error(ex);
+		}
+	}
+
 	async function LogoutFromTwitch(event) {
 		event.preventDefault();
 
 		try {
-			const response = await fetch('/api/twitch/logout', {method: 'POST'});
+			const response = await fetch('/api/twitch/logout', {
+				method: 'POST',
+				headers: {'X-CSRF-Token': GetCsrfToken()}
+			});
 			if (!response.ok) {
 				throw new Error("Logout failed with status " + response.status);
 			}
