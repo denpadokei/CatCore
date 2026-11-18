@@ -14,6 +14,7 @@ using CatCore.Models.Api.Responses;
 using CatCore.Models.Config;
 using CatCore.Models.Credentials;
 using CatCore.Models.Twitch.OAuth;
+using CatCore.Services.Credentials;
 using CatCore.Services.Interfaces;
 using CatCore.Services.Twitch;
 using FluentAssertions;
@@ -782,7 +783,8 @@ namespace CatCoreTests
 				new TestKittenPathProvider(_dataPath),
 				new TestConstants(),
 				new Version(2, 0, 0),
-				handler);
+				handler,
+				new PlaintextCredentialsProtector());
 		}
 
 		private void SeedCredentials(string accessToken, string refreshToken, DateTimeOffset validUntil, string? tokenSource)

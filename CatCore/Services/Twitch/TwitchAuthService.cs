@@ -14,6 +14,7 @@ using CatCore.Helpers;
 using CatCore.Helpers.JSON;
 using CatCore.Models.Credentials;
 using CatCore.Models.Twitch.OAuth;
+using CatCore.Services.Credentials;
 using CatCore.Services.Interfaces;
 using CatCore.Shared.Models.Twitch.OAuth;
 using CatCore.Services.Twitch.Interfaces;
@@ -191,13 +192,19 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		public TwitchAuthService(ILogger logger, IKittenPathProvider kittenPathProvider, ConstantsBase constants, Version libraryVersion)
-			: this(logger, kittenPathProvider, constants, libraryVersion, null)
+		public TwitchAuthService(ILogger logger, IKittenPathProvider kittenPathProvider, ConstantsBase constants, Version libraryVersion, ICredentialsProtector credentialsProtector)
+			: this(logger, kittenPathProvider, constants, libraryVersion, null, credentialsProtector)
 		{
 		}
 
-		internal TwitchAuthService(ILogger logger, IKittenPathProvider kittenPathProvider, ConstantsBase constants, Version libraryVersion, HttpMessageHandler? httpMessageHandler)
-			: base(logger, kittenPathProvider)
+		internal TwitchAuthService(
+			ILogger logger,
+			IKittenPathProvider kittenPathProvider,
+			ConstantsBase constants,
+			Version libraryVersion,
+			HttpMessageHandler? httpMessageHandler,
+			ICredentialsProtector? credentialsProtector = null)
+			: base(logger, kittenPathProvider, credentialsProtector ?? CredentialsProtectorFactory.CreateDefault())
 		{
 			_logger = logger;
 			_constants = constants;

@@ -39,6 +39,7 @@
 			<RepackInputAssemblies Include="System.Reflection.Emit.ILGeneration.dll"/>
 			<RepackInputAssemblies Include="System.Reflection.Emit.Lightweight.dll"/>
 			<RepackInputAssemblies Include="System.Runtime.CompilerServices.Unsafe.dll"/>
+			<RepackInputAssemblies Include="System.Security.Cryptography.ProtectedData.dll"/>
 			<RepackInputAssemblies Include="System.Text.Encodings.Web.dll"/>
 			<RepackInputAssemblies Include="System.Text.Json.dll"/>
 			<RepackInputAssemblies Include="System.Threading.Tasks.Extensions.dll"/>
