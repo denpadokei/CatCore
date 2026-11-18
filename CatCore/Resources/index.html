@@ -199,7 +199,7 @@
 								Login on Twitch
 							</a>
 							<a id="twitch-logout-button" class="waves-effect waves-light btn red darken-1 hide"
-							   href="/api/twitch/logout">
+							   href="#" onclick="LogoutFromTwitch(event)">
 								Logout from Twitch
 							</a>
 						</div>
@@ -527,6 +527,11 @@
 
 	// Loading state
 	async function OnLoad() {
+		var currentSearch = (window.location && window.location.search) || "";
+		if (currentSearch.indexOf("twitchLogoutError=revoke_failed") !== -1) {
+			M.toast({html: "Logged out locally, but Twitch could not revoke the token. Please try again.", displayLength: 8000});
+		}
+
 		await Promise.all([LoadTwitchState(), LoadGlobalState()]);
 
 		let twitchChannelsAutocomplete = document.getElementById("additionalchannel-input");
@@ -547,6 +552,12 @@
 		additionalTwitchChannelsAutocompleteInstance.el.addEventListener('keyup', requestTwitchChannelSuggestions);
 	}
 
+	function EscapeHtml(value) {
+		return String(value).replace(/[&<>"']/g, function (character) {
+			return {"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"}[character];
+		});
+	}
+
 	async function LoadTwitchState() {
 		const twitchLoadingSpinner = document.getElementById("twitch-loading-spinner");
 		twitchLoadingSpinner.style.visibility = "visible"
@@ -554,6 +565,10 @@
 		try {
 			const response = await fetch("/api/twitch/state");
 			const body = await response.json();
+
+			if (body["LocalAuthorizationError"]) {
+				M.toast({html: "The Twitch login did not complete: " + EscapeHtml(body["LocalAuthorizationError"]), displayLength: 8000});
+			}
 
 			ApplyTwitchState(body, true);
 
@@ -655,6 +670,28 @@
 		document.getElementById("twitch-local-authorization-code").textContent = code;
 		document.getElementById("twitch-local-authorization-link").href = verificationUri;
 		panel.classList.remove("hide");
+	}
+
+	async function LogoutFromTwitch(event) {
+		event.preventDefault();
+
+		try {
+			const response = await fetch('/api/twitch/logout', {method: 'POST'});
+			if (!response.ok) {
+				throw new Error("Logout failed with status " + response.status);
+			}
+
+			// fetch follows the 302 transparently, so the error flag is only visible in the
+			// final response URL; a subsequent reload would lose it.
+			if (response.url && response.url.indexOf("twitchLogoutError=revoke_failed") !== -1) {
+				M.toast({html: "Logged out locally, but Twitch could not revoke the token. Please try again.", displayLength: 8000});
+			}
+
+			window.location.reload();
+		} catch (ex) {
+			M.toast({html: "Could not log out of Twitch. Please try again."});
+			console.error(ex);
+		}
 	}
 
 	function CopyLocalAuthorizationCode() {

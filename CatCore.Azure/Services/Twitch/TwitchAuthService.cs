@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace CatCore.Azure.Services.Twitch
@@ -19,9 +21,9 @@ namespace CatCore.Azure.Services.Twitch
 			_authClient.DefaultRequestHeaders.UserAgent.TryParseAdd($"{nameof(CatCore)}/1.0.0");
 		}
 
-		public Task<Stream?> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl)
+		public Task<TwitchTokenResponse> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl)
 		{
-			return PostFormExpectStreamInternal(new Dictionary<string, string>
+			return PostFormExpectTokenResponse(new Dictionary<string, string>
 			{
 				["client_id"] = Environment.GetEnvironmentVariable("Twitch_CatCore_ClientId") ?? string.Empty,
 				["client_secret"] = Environment.GetEnvironmentVariable("Twitch_CatCore_ClientSecret") ?? string.Empty,
@@ -31,14 +33,14 @@ namespace CatCore.Azure.Services.Twitch
 			});
 		}
 
-		public Task<Stream?> RefreshTokens(string refreshToken)
+		public Task<TwitchTokenResponse> RefreshTokens(string refreshToken)
 		{
 			if (string.IsNullOrWhiteSpace(refreshToken))
 			{
-				return Task.FromResult<Stream?>(null);
+				return Task.FromResult(TwitchTokenResponse.Failure(HttpStatusCode.BadRequest, "missing refresh_token"));
 			}
 
-			return PostFormExpectStreamInternal(new Dictionary<string, string>
+			return PostFormExpectTokenResponse(new Dictionary<string, string>
 			{
 				["client_id"] = Environment.GetEnvironmentVariable("Twitch_CatCore_ClientId") ?? string.Empty,
 				["client_secret"] = Environment.GetEnvironmentVariable("Twitch_CatCore_ClientSecret") ?? string.Empty,
@@ -51,23 +53,49 @@ namespace CatCore.Azure.Services.Twitch
 		/// Sends the token request with the client secret in the form body instead of the URL, so
 		/// the secret cannot end up in outbound request logs or dependency telemetry.
 		/// </summary>
-		private async Task<Stream?> PostFormExpectStreamInternal(Dictionary<string, string> parameters)
+		private async Task<TwitchTokenResponse> PostFormExpectTokenResponse(Dictionary<string, string> parameters)
 		{
 			using var content = new FormUrlEncodedContent(parameters);
 			using var responseMessage = await _authClient
 				.PostAsync("token", content)
 				.ConfigureAwait(false);
 
+			var responseBody = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 			if (!responseMessage.IsSuccessStatusCode)
+			{
+				return TwitchTokenResponse.Failure(responseMessage.StatusCode, ExtractErrorMessage(responseBody));
+			}
+
+			var memoryStream = new MemoryStream(Encoding.UTF8.GetBytes(responseBody));
+			return TwitchTokenResponse.Success(memoryStream);
+		}
+
+		private static string? ExtractErrorMessage(string responseBody)
+		{
+			if (string.IsNullOrWhiteSpace(responseBody))
 			{
 				return null;
 			}
 
-			var memoryStream = new MemoryStream();
-			await responseMessage.Content.CopyToAsync(memoryStream).ConfigureAwait(false);
-			memoryStream.Seek(0, SeekOrigin.Begin);
+			try
+			{
+				using var document = JsonDocument.Parse(responseBody);
+				if (document.RootElement.TryGetProperty("message", out var message))
+				{
+					return message.GetString();
+				}
 
-			return memoryStream;
+				if (document.RootElement.TryGetProperty("error", out var error))
+				{
+					return error.GetString();
+				}
+			}
+			catch (JsonException)
+			{
+				// Non-JSON error page; keep a short excerpt for diagnostics only.
+			}
+
+			return responseBody.Length <= 200 ? responseBody : null;
 		}
 	}
 }

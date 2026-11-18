@@ -176,22 +176,41 @@ namespace CatCoreTests
 		}
 
 		[Fact]
-		public async Task AuthorizationCallbackRejectsAMissingOrMismatchedState()
+		public async Task ARejectedCallbackDoesNotConsumeThePendingAuthorizationState()
 		{
-			var handler = new StubHttpMessageHandler((_, _) => throw new InvalidOperationException("No HTTP request may be made when the OAuth state is invalid"));
+			var backendRequestCount = 0;
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					backendRequestCount++;
+					return JsonResponse(TokenJson("backend-access", "backend-refresh"));
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/validate", StringComparison.Ordinal))
+				{
+					return JsonResponse(ValidationJson());
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
 			var authService = CreateAuthService(handler);
 
 			var authorizationUrl = authService.AuthorizationUrl("https://localhost/callback");
 			var state = ExtractState(authorizationUrl);
 
+			var mismatchedStateResult = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", state + "0");
 			var missingStateResult = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", null);
 
-			authorizationUrl = authService.AuthorizationUrl("https://localhost/callback");
-			var mismatchedStateResult = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", state + "0");
-
-			missingStateResult.Should().BeNull();
 			mismatchedStateResult.Should().BeNull();
-			handler.Requests.Should().BeEmpty();
+			missingStateResult.Should().BeNull();
+			backendRequestCount.Should().Be(0);
+
+			// The forged callbacks must not invalidate the login the user actually started.
+			var validResult = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", state);
+			validResult.Should().BeNull();
+			backendRequestCount.Should().Be(1);
+			authService.AccessToken.Should().Be("backend-access");
 		}
 
 		[Fact]
@@ -356,6 +375,209 @@ namespace CatCoreTests
 				loginUrl.Should().Be(DEVICE_VERIFICATION_URI);
 				authService.PendingDeviceAuthorization.Should().NotBeNull();
 				authService.PendingDeviceAuthorization!.Value.VerificationUri.Should().Be(DEVICE_VERIFICATION_URI);
+			}
+			finally
+			{
+				await authService.RevokeTokens();
+			}
+		}
+
+		[Fact]
+		public async Task AFailedValidationAfterRefreshKeepsTheRotatedTokens()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddMinutes(-10), TwitchTokenSources.AuthBackend);
+
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					return JsonResponse(TokenJson("new-access", "new-refresh"));
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/validate", StringComparison.Ordinal))
+				{
+					// A temporary Twitch error must not wipe the freshly rotated pair.
+					return JsonResponse("{\"status\":503,\"message\":\"service unavailable\"}", HttpStatusCode.ServiceUnavailable);
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			var refreshed = await authService.RefreshTokens(force: true);
+
+			refreshed.Should().BeTrue();
+			authService.HasTokens.Should().BeTrue();
+			authService.Status.Should().NotBe(AuthenticationStatus.Unauthorized);
+
+			var storedCredentials = LoadStoredCredentials();
+			storedCredentials.AccessToken.Should().Be("new-access");
+			storedCredentials.RefreshToken.Should().Be("new-refresh");
+		}
+
+		[Fact]
+		public async Task AnIncompleteTokenResponseDoesNotOverwriteExistingCredentials()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddHours(1), TwitchTokenSources.AuthBackend);
+
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					return JsonResponse("{}");
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/token", StringComparison.Ordinal))
+				{
+					return JsonResponse("{\"status\":400,\"message\":\"invalid client\"}", HttpStatusCode.BadRequest);
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			var refreshed = await authService.RefreshTokens(force: true);
+
+			refreshed.Should().BeFalse();
+			authService.HasTokens.Should().BeTrue();
+
+			var storedCredentials = LoadStoredCredentials();
+			storedCredentials.AccessToken.Should().Be("old-access");
+			storedCredentials.RefreshToken.Should().Be("old-refresh");
+		}
+
+		[Fact]
+		public async Task ABackendRejectionOfTheAuthorizationCodeDoesNotStartTheDeviceFlow()
+		{
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					return new HttpResponseMessage(HttpStatusCode.BadRequest);
+				}
+
+				throw new InvalidOperationException("The device flow must not start after a permanent rejection");
+			});
+			var authService = CreateAuthService(handler);
+
+			var authorizationUrl = authService.AuthorizationUrl("https://localhost/callback");
+			var state = ExtractState(authorizationUrl);
+
+			var redirectUri = await authService.GetTokensByAuthorizationCode("code-1", "https://localhost/callback", state);
+
+			redirectUri.Should().BeNull();
+			authService.PendingDeviceAuthorization.Should().BeNull();
+		}
+
+		[Fact]
+		public async Task APermanentRefreshRejectionMarksReauthorizationRequired()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddMinutes(-10), TwitchTokenSources.AuthBackend);
+
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					return new HttpResponseMessage(HttpStatusCode.Unauthorized);
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			var refreshed = await authService.RefreshTokens(force: true);
+
+			refreshed.Should().BeFalse();
+			authService.HasTokens.Should().BeTrue();
+			authService.Status.Should().Be(AuthenticationStatus.Unauthorized);
+
+			// A rejected refresh must not destroy the only stored token pair.
+			var storedCredentials = LoadStoredCredentials();
+			storedCredentials.RefreshToken.Should().Be("old-refresh");
+		}
+
+		[Fact]
+		public async Task ABackendNotFoundDoesNotDiscardValidCredentials()
+		{
+			SeedCredentials("old-access", "old-refresh", DateTimeOffset.Now.AddMinutes(-10), TwitchTokenSources.AuthBackend);
+
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					// A missing route is an infrastructure problem, not a rejected refresh token.
+					return new HttpResponseMessage(HttpStatusCode.NotFound);
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/token", StringComparison.Ordinal))
+				{
+					return JsonResponse("{\"status\":400,\"message\":\"invalid client\"}", HttpStatusCode.BadRequest);
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			var refreshed = await authService.RefreshTokens(force: true);
+
+			refreshed.Should().BeFalse();
+			authService.HasTokens.Should().BeTrue();
+			authService.Status.Should().NotBe(AuthenticationStatus.Unauthorized);
+
+			var storedCredentials = LoadStoredCredentials();
+			storedCredentials.RefreshToken.Should().Be("old-refresh");
+		}
+
+		[Fact]
+		public async Task DeviceCodePollingRetriesTransientFailures()
+		{
+			var tokenRequestCount = 0;
+			var handler = new StubHttpMessageHandler((request, _) =>
+			{
+				if (IsAuthBackendRequest(request))
+				{
+					throw new HttpRequestException("The CatCore auth back-end is down");
+				}
+
+				if (request.RequestUri!.AbsolutePath.EndsWith("/device", StringComparison.Ordinal))
+				{
+					return JsonResponse(DeviceAuthorizationJson());
+				}
+
+				if (request.RequestUri.AbsolutePath.EndsWith("/token", StringComparison.Ordinal))
+				{
+					tokenRequestCount++;
+					if (tokenRequestCount == 1)
+					{
+						throw new HttpRequestException("Transient network failure");
+					}
+
+					return JsonResponse(TokenJson("device-access", "device-refresh"));
+				}
+
+				if (request.RequestUri.AbsolutePath.EndsWith("/validate", StringComparison.Ordinal))
+				{
+					return JsonResponse(ValidationJson());
+				}
+
+				return new HttpResponseMessage(HttpStatusCode.OK);
+			});
+			var authService = CreateAuthService(handler);
+
+			try
+			{
+				var loginUrl = await authService.GetLoginUrl("https://localhost/callback");
+				loginUrl.Should().Be(DEVICE_VERIFICATION_URI);
+
+				var timeout = DateTimeOffset.Now.AddSeconds(20);
+				while (!authService.HasTokens && DateTimeOffset.Now < timeout)
+				{
+					await Task.Delay(100);
+				}
+
+				authService.HasTokens.Should().BeTrue();
+				authService.AccessToken.Should().Be("device-access");
+				tokenRequestCount.Should().BeGreaterThan(1);
 			}
 			finally
 			{

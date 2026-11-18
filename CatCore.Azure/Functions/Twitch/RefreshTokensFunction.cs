@@ -29,9 +29,10 @@ namespace CatCore.Azure.Functions.Twitch
 			}
 
 			var twitchAuthService = executionContext.InstanceServices.GetService<TwitchAuthService>()!;
-			await using var authorizationResponseStream = await twitchAuthService.RefreshTokens(refreshToken).ConfigureAwait(false);
+			var tokenResponse = await twitchAuthService.RefreshTokens(refreshToken).ConfigureAwait(false);
 
 			HttpResponseData response;
+			await using var authorizationResponseStream = tokenResponse.Body;
 			if (authorizationResponseStream != null)
 			{
 				response = req.CreateResponse(HttpStatusCode.OK);
@@ -39,8 +40,8 @@ namespace CatCore.Azure.Functions.Twitch
 			}
 			else
 			{
-				logger.LogInformation("Couldn't refresh existing credentials through Twitch Auth server");
-				response = req.CreateResponse(HttpStatusCode.Unauthorized);
+				logger.LogWarning("Twitch rejected the token refresh: status {TwitchStatus}, error {Error}", tokenResponse.TwitchStatus, tokenResponse.ErrorMessage);
+				response = req.CreateResponse(tokenResponse.ToHttpStatusCode());
 			}
 
 			return response;

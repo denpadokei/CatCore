@@ -21,6 +21,11 @@ namespace CatCore.Services.Twitch.Interfaces
 		/// </summary>
 		TwitchDeviceAuthorizationInfo? PendingDeviceAuthorization { get; }
 
+		/// <summary>
+		/// Reason why the most recent local authorization did not complete, or <c>null</c>.
+		/// </summary>
+		string? LocalAuthorizationError { get; }
+
 		void Initialize();
 		ValidationResponse? FetchLoggedInUserInfo();
 		Task<ValidationResponse?> FetchLoggedInUserInfoWithRefresh();

@@ -186,10 +186,12 @@ namespace CatCore.Services
 					response.Redirect(postAuthorizationRedirectUri ?? request.Url.GetLeftPart(UriPartial.Authority));
 
 					return true;
-				case "logout" when request.HttpMethod == "GET":
-					await _twitchAuthService.RevokeTokens().ConfigureAwait(false);
+				case "logout" when request.HttpMethod == "POST":
+					var revoked = await _twitchAuthService.RevokeTokens().ConfigureAwait(false);
 
-					response.Redirect(request.Url.GetLeftPart(UriPartial.Authority));
+					response.Redirect(revoked
+						? request.Url.GetLeftPart(UriPartial.Authority)
+						: $"{request.Url.GetLeftPart(UriPartial.Authority)}?twitchLogoutError=revoke_failed");
 
 					return true;
 				case "state" when request.HttpMethod == "GET":
@@ -209,7 +211,7 @@ namespace CatCore.Services
 
 					await JsonSerializer
 						.SerializeAsync(response.OutputStream, new TwitchStateResponseDto(_twitchAuthService.TokenIsValid, loggedInUserInfo, userInfos, _settingsService.Config.TwitchConfig,
-							pendingDeviceAuthorization))
+							pendingDeviceAuthorization, _twitchAuthService.LocalAuthorizationError))
 						.ConfigureAwait(false);
 
 					return true;

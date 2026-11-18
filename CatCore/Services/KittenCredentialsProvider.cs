@@ -41,7 +41,7 @@ namespace CatCore.Services
 			Load();
 		}
 
-		private void Store()
+		private bool Store()
 		{
 			try
 			{
@@ -56,11 +56,23 @@ namespace CatCore.Services
 
 				WriteToDiskNoSafeGuards(Credentials);
 
-				OnCredentialsChanged?.Invoke();
+				try
+				{
+					OnCredentialsChanged?.Invoke();
+				}
+				catch (Exception e)
+				{
+					// A failing subscriber must not make a successful disk write look like a
+					// persistence failure.
+					_logger.Error(e, "A subscriber of OnCredentialsChanged for service {ServiceType} threw", ServiceType);
+				}
+
+				return true;
 			}
 			catch (Exception e)
 			{
 				_logger.Error(e, "An error occurred while trying to store the config for service {ServiceType}", ServiceType);
+				return false;
 			}
 			finally
 			{
@@ -68,16 +80,17 @@ namespace CatCore.Services
 			}
 		}
 
-		// If credentials objects are deemed equal, then the credentials object is only updated in-memory, but not persisted to disk
-		protected void UpdateCredentials(T credentials)
+		/// <summary>
+		/// Updates the in-memory credentials and persists them when they changed. Returns
+		/// <c>false</c> when persistence failed, so callers can avoid treating a refresh as
+		/// successful when the rotated token pair only exists in memory.
+		/// </summary>
+		protected bool UpdateCredentials(T credentials)
 		{
 			var shouldStore = !credentials.Equals(Credentials);
 			Credentials = credentials;
 
-			if (shouldStore)
-			{
-				Store();
-			}
+			return !shouldStore || Store();
 		}
 
 		private void Load()

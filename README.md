@@ -40,6 +40,8 @@ the library or sent to a server:
   automatically, without a second click.
 - The sign-in service receives the authorization code and refresh token in the POST body, not in the
   request URL, so they do not end up in reverse-proxy or request-log URLs.
+- Because of that contract change, deploy the Azure Functions before distributing a client build that
+  uses it. The functions still accept the old query parameters, so older clients keep working.
 
 > **Token storage:** CatCore stores the credentials as a JSON file in its data folder, protected only by
 > the permissions of your user account. Locally obtained refresh tokens can be renewed without a client
