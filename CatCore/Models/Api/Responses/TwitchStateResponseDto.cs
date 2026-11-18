@@ -23,9 +23,10 @@ namespace CatCore.Models.Api.Responses
 		public string? LocalAuthorizationUserCode { get; }
 		public string? LocalAuthorizationVerificationUri { get; }
 		public DateTimeOffset? LocalAuthorizationExpiresAt { get; }
+		public string? LocalAuthorizationError { get; }
 
 		public TwitchStateResponseDto(bool isValid, ValidationResponse? loggedInUser, IEnumerable<UserData>? channelData, TwitchConfig twitchConfig,
-			TwitchDeviceAuthorizationInfo? pendingDeviceAuthorization = null)
+			TwitchDeviceAuthorizationInfo? pendingDeviceAuthorization = null, string? localAuthorizationError = null)
 		{
 			LoggedIn = isValid;
 
@@ -45,6 +46,7 @@ namespace CatCore.Models.Api.Responses
 			LocalAuthorizationUserCode = pendingDeviceAuthorization?.UserCode;
 			LocalAuthorizationVerificationUri = pendingDeviceAuthorization?.VerificationUri;
 			LocalAuthorizationExpiresAt = pendingDeviceAuthorization?.ExpiresAt;
+			LocalAuthorizationError = localAuthorizationError;
 		}
 	}
 }

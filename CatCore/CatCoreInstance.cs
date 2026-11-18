@@ -10,6 +10,7 @@ using CatCore.Logging;
 using CatCore.Models.Twitch;
 using CatCore.Models.Twitch.IRC;
 using CatCore.Services;
+using CatCore.Services.Credentials;
 using CatCore.Services.Interfaces;
 using CatCore.Services.Multiplexer;
 using CatCore.Services.Twitch;
@@ -123,6 +124,7 @@ namespace CatCore
 			container.Register<IKittenWebSocketProvider, KittenWebSocketProvider>(Reuse.Transient);
 			container.Register<IKittenBrowserLauncherService, KittenBrowserLauncherService>(Reuse.Singleton);
 			container.Register<IKittenPathProvider, KittenPathProvider>(Reuse.Singleton);
+			container.Register<ICredentialsProtector>(Made.Of(() => CredentialsProtectorFactory.CreateDefault()), Reuse.Singleton);
 			container.Register<IKittenSettingsService, KittenSettingsService>(Reuse.Singleton);
 			container.RegisterInitializer<IKittenSettingsService>((service, _) => service.Initialize());
 			container.Register<IKittenApiService, KittenApiService>(Reuse.Singleton);

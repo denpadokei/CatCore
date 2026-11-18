@@ -1,5 +1,6 @@
 using System;
 using CatCore;
+using CatCore.Services.Credentials;
 using CatCore.Services.Interfaces;
 using CatCore.Services.Twitch;
 using FluentAssertions;
@@ -16,7 +17,7 @@ namespace CatCoreTests
 		private static TwitchAuthService CreateAuthService()
 		{
 			var logger = new LoggerConfiguration().CreateLogger();
-			return new TwitchAuthService(logger, new TestKittenPathProvider(), new TestConstants(), new Version(2, 0, 0));
+			return new TwitchAuthService(logger, new TestKittenPathProvider(), new TestConstants(), new Version(2, 0, 0), new PlaintextCredentialsProtector());
 		}
 
 		[Fact]

@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Threading.Tasks;
 using System.Web;
+using CatCore.Azure.Http;
 using CatCore.Azure.Services.Twitch;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Azure.Functions.Worker.Http;
@@ -19,18 +20,20 @@ namespace CatCore.Azure.Functions.Twitch
 			var logger = executionContext.GetLogger(nameof(AuthorizationCodeToTokensFunction));
 
 			var queryParametersCollection = HttpUtility.ParseQueryString(req.Url.Query);
-			var authorizationCode = queryParametersCollection["code"];
-			var redirectUrl = queryParametersCollection["redirect_uri"];
+			var formParametersCollection = await req.ReadFormCollectionAsync().ConfigureAwait(false);
+			var authorizationCode = formParametersCollection["code"] ?? queryParametersCollection["code"];
+			var redirectUrl = formParametersCollection["redirect_uri"] ?? queryParametersCollection["redirect_uri"];
 			if (string.IsNullOrWhiteSpace(authorizationCode) || string.IsNullOrWhiteSpace(redirectUrl))
 			{
-				logger.LogInformation("API Call is missing one of the required query parameters");
+				logger.LogInformation("API Call is missing one of the required parameters");
 				return req.CreateResponse(HttpStatusCode.BadRequest);
 			}
 
 			var twitchAuthService = executionContext.InstanceServices.GetService<TwitchAuthService>()!;
-			await using var authorizationResponseStream = await twitchAuthService.GetTokensByAuthorizationCode(authorizationCode, redirectUrl).ConfigureAwait(false);
+			var tokenResponse = await twitchAuthService.GetTokensByAuthorizationCode(authorizationCode, redirectUrl).ConfigureAwait(false);
 
 			HttpResponseData response;
+			await using var authorizationResponseStream = tokenResponse.Body;
 			if (authorizationResponseStream != null)
 			{
 				response = req.CreateResponse(HttpStatusCode.OK);
@@ -38,8 +41,8 @@ namespace CatCore.Azure.Functions.Twitch
 			}
 			else
 			{
-				logger.LogInformation("Couldn't trade authorization code for credentials from Twitch Auth server");
-				response = req.CreateResponse(HttpStatusCode.Unauthorized);
+				logger.LogWarning("Twitch rejected the authorization code exchange: status {TwitchStatus}, error {Error}", tokenResponse.TwitchStatus, tokenResponse.ErrorMessage);
+				response = req.CreateResponse(tokenResponse.ToHttpStatusCode());
 			}
 
 			return response;

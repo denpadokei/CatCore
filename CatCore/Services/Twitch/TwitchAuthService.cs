@@ -6,6 +6,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,7 @@ using CatCore.Helpers;
 using CatCore.Helpers.JSON;
 using CatCore.Models.Credentials;
 using CatCore.Models.Twitch.OAuth;
+using CatCore.Services.Credentials;
 using CatCore.Services.Interfaces;
 using CatCore.Shared.Models.Twitch.OAuth;
 using CatCore.Services.Twitch.Interfaces;
@@ -39,12 +41,14 @@ namespace CatCore.Services.Twitch
 		private static readonly TimeSpan FAILED_REFRESH_RETRY_DELAY = TimeSpan.FromMinutes(1);
 		private static readonly TimeSpan AUTH_BACKEND_PROBE_TIMEOUT = TimeSpan.FromSeconds(5);
 		private static readonly TimeSpan AUTH_BACKEND_REQUEST_TIMEOUT = TimeSpan.FromSeconds(20);
+		private static readonly TimeSpan DEVICE_AUTHORIZATION_REQUEST_TIMEOUT = TimeSpan.FromSeconds(10);
 		private const int FAILED_REFRESH_RETRY_MAX_MINUTES = 60;
 
 		private readonly AsyncRetryPolicy<HttpResponseMessage> _exceptionRetryPolicy;
 
 		private readonly SemaphoreSlim _refreshLocker = new(1, 1);
 		private readonly SemaphoreSlim _loggedInUserUpdateLocker = new(1, 1);
+		private readonly SemaphoreSlim _deviceAuthorizationStartLocker = new(1, 1);
 
 		/// <summary>
 		/// Scopes that CatCore cannot work without. A token that is missing one of them is rejected.
@@ -115,6 +119,7 @@ namespace CatCore.Services.Twitch
 		private readonly object _validationLoopStateLock = new();
 		private readonly object _forcedRefreshStateLock = new();
 		private readonly object _deviceAuthorizationStateLock = new();
+		private readonly object _authorizationStateLock = new();
 
 		private ValidationResponse? _loggedInUser;
 		private AuthenticationStatus _status;
@@ -128,6 +133,8 @@ namespace CatCore.Services.Twitch
 
 		private PendingDeviceAuthorizationState? _pendingDeviceAuthorization;
 		private CancellationTokenSource? _deviceAuthorizationCancellationTokenSource;
+		private string? _lastDeviceAuthorizationError;
+		private string? _pendingAuthorizationState;
 
 		protected override string ServiceType => SERVICE_TYPE;
 
@@ -157,6 +164,17 @@ namespace CatCore.Services.Twitch
 
 		public event Action<AuthenticationStatus>? OnAuthenticationStatusChanged;
 
+		public string? LocalAuthorizationError
+		{
+			get
+			{
+				lock (_deviceAuthorizationStateLock)
+				{
+					return _lastDeviceAuthorizationError;
+				}
+			}
+		}
+
 		public TwitchDeviceAuthorizationInfo? PendingDeviceAuthorization
 		{
 			get
@@ -174,13 +192,19 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
-		public TwitchAuthService(ILogger logger, IKittenPathProvider kittenPathProvider, ConstantsBase constants, Version libraryVersion)
-			: this(logger, kittenPathProvider, constants, libraryVersion, null)
+		public TwitchAuthService(ILogger logger, IKittenPathProvider kittenPathProvider, ConstantsBase constants, Version libraryVersion, ICredentialsProtector credentialsProtector)
+			: this(logger, kittenPathProvider, constants, libraryVersion, null, credentialsProtector)
 		{
 		}
 
-		internal TwitchAuthService(ILogger logger, IKittenPathProvider kittenPathProvider, ConstantsBase constants, Version libraryVersion, HttpMessageHandler? httpMessageHandler)
-			: base(logger, kittenPathProvider)
+		internal TwitchAuthService(
+			ILogger logger,
+			IKittenPathProvider kittenPathProvider,
+			ConstantsBase constants,
+			Version libraryVersion,
+			HttpMessageHandler? httpMessageHandler,
+			ICredentialsProtector? credentialsProtector = null)
+			: base(logger, kittenPathProvider, credentialsProtector ?? CredentialsProtectorFactory.CreateDefault())
 		{
 			_logger = logger;
 			_constants = constants;
@@ -344,10 +368,16 @@ namespace CatCore.Services.Twitch
 				cancellationTokenSource = new CancellationTokenSource();
 				_forcedRefreshCancellationTokenSource = cancellationTokenSource;
 				_forcedRefreshTask = Task.Run(() => RunForcedRefreshSchedule(delay, cancellationTokenSource.Token));
+				_ = _forcedRefreshTask.ContinueWith(t =>
+				{
+					if (t.IsFaulted && t.Exception != null)
+					{
+						_logger.Error(t.Exception, "Scheduled Twitch token refresh encountered an unhandled exception");
+					}
+				}, TaskContinuationOptions.OnlyOnFaulted);
 			}
 
 			previousCancellationTokenSource?.Cancel();
-			previousCancellationTokenSource?.Dispose();
 
 			_logger.Information("Scheduled forced Twitch token refresh in {Delay}", delay.ToString("g"));
 		}
@@ -368,7 +398,8 @@ namespace CatCore.Services.Twitch
 			}
 
 			cancellationTokenSource.Cancel();
-			cancellationTokenSource.Dispose();
+			// Do not dispose here: a task started with this token may still be reading
+			// IsCancellationRequested on exit.
 		}
 
 		private async Task RunForcedRefreshSchedule(TimeSpan delay, CancellationToken cancellationToken)
@@ -396,6 +427,10 @@ namespace CatCore.Services.Twitch
 			catch (OperationCanceledException)
 			{
 				// Expected when rescheduling or clearing the current forced refresh task
+			}
+			catch (ObjectDisposedException)
+			{
+				// The refresh may have permanently invalidated its own cancellation source
 			}
 		}
 
@@ -457,13 +492,48 @@ namespace CatCore.Services.Twitch
 
 		public string AuthorizationUrl(string redirectUrl)
 		{
+			var state = CreateAuthorizationState();
+			lock (_authorizationStateLock)
+			{
+				_pendingAuthorizationState = state;
+			}
+
 			var scopes = _twitchAuthorizationScope.Concat(_twitchOptionalAuthorizationScope);
 			return $"{TWITCH_AUTH_BASEURL}authorize" +
 			       $"?client_id={_constants.TwitchClientId}" +
-			       $"&redirect_uri={redirectUrl}" +
+			       $"&redirect_uri={Uri.EscapeDataString(redirectUrl)}" +
 			       "&response_type=code" +
 			       "&force_verify=true" +
-			       $"&scope={string.Join(" ", scopes)}";
+			       $"&scope={string.Join(" ", scopes)}" +
+			       $"&state={state}";
+		}
+
+		private static string CreateAuthorizationState()
+		{
+			var stateBytes = new byte[16];
+			using (var randomNumberGenerator = RandomNumberGenerator.Create())
+			{
+				randomNumberGenerator.GetBytes(stateBytes);
+			}
+
+			return BitConverter.ToString(stateBytes).Replace("-", string.Empty).ToLowerInvariant();
+		}
+
+		private bool TryConsumeAuthorizationState(string? state)
+		{
+			lock (_authorizationStateLock)
+			{
+				var expectedState = _pendingAuthorizationState;
+				if (string.IsNullOrWhiteSpace(expectedState) || !string.Equals(expectedState, state, StringComparison.Ordinal))
+				{
+					// Keep the pending state: a forged or accidental callback must not invalidate
+					// the login the user actually started.
+					return false;
+				}
+
+				_pendingAuthorizationState = null;
+				return true;
+			}
 		}
 
 		/// <summary>
@@ -491,12 +561,30 @@ namespace CatCore.Services.Twitch
 		/// browser is redirected to Twitch's activation page.
 		/// </summary>
 		/// <returns>The URL to redirect the browser to after the callback, or <c>null</c> to return to the portal.</returns>
-		public async Task<string?> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl)
+		public async Task<string?> GetTokensByAuthorizationCode(string authorizationCode, string redirectUrl, string? state)
 		{
+			if (!TryConsumeAuthorizationState(state))
+			{
+				_logger.Warning("Rejecting the Twitch authorization callback because the OAuth state is missing or does not match the state of the login that was started");
+				return null;
+			}
+
 			_logger.Information("Exchanging authorization code for credentials using secure CatCore auth back-end");
 
 			var backendOutcome = await ExchangeAuthorizationCodeThroughBackend(authorizationCode, redirectUrl).ConfigureAwait(false);
-			if (backendOutcome != BackendCallOutcome.Unavailable)
+			if (backendOutcome == BackendCallOutcome.Rejected)
+			{
+				_logger.Warning("The CatCore auth back-end rejected the authorization code; the user has to start a new login");
+				return null;
+			}
+
+			if (backendOutcome == BackendCallOutcome.Unknown)
+			{
+				_logger.Error("The authorization code exchange did not finish within the timeout. The code may already be consumed; ask the user to try again");
+				return null;
+			}
+
+			if (backendOutcome == BackendCallOutcome.Success)
 			{
 				return null;
 			}
@@ -514,31 +602,45 @@ namespace CatCore.Services.Twitch
 
 			try
 			{
+				using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+				{
+					["code"] = authorizationCode,
+					["redirect_uri"] = redirectUrl
+				});
 				using var responseMessage = await _catCoreAuthClient
-					.PostAsync(BuildAuthBackendUri("api/twitch/authorize" +
-					                               $"?code={Uri.EscapeDataString(authorizationCode)}" +
-					                               $"&redirect_uri={Uri.EscapeDataString(redirectUrl)}"), null)
+					.PostAsync(BuildAuthBackendUri("api/twitch/authorize"), content)
 					.ConfigureAwait(false);
 
 				if (!responseMessage.IsSuccessStatusCode)
 				{
 					// Any non-success response means that the authorization code route could not
-					// complete. Fall back to the local flow so a broken or misconfigured back-end
-					// does not make authentication impossible.
+					// complete. A 4xx is a permanent rejection; don't convert it into a second
+					// authorization flow. 5xx/408/429/transport errors are treated as unavailable.
 					_logger.Warning("Exchanging the authorization code for credentials resulted in non-success status code: {StatusCode}", responseMessage.StatusCode);
-					return BackendCallOutcome.Unavailable;
+					return IsBackendPermanentFailureStatusCode(responseMessage.StatusCode)
+						? BackendCallOutcome.Rejected
+						: BackendCallOutcome.Unavailable;
 				}
 
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
+				if (string.IsNullOrWhiteSpace(authorizationResponse.AccessToken) || string.IsNullOrWhiteSpace(authorizationResponse.RefreshToken))
+				{
+					_logger.Warning("The CatCore auth back-end returned an incomplete token pair");
+					return BackendCallOutcome.Unavailable;
+				}
+
 				var newCredentials = new TwitchCredentials(authorizationResponse, TwitchTokenSources.AuthBackend);
 				// Persist first: the authorization code has already been consumed, so losing the
 				// tokens because a subsequent validation call fails would force a new login.
 				_scopeMismatchDetected = false;
-				UpdateCredentials(newCredentials);
+				if (!UpdateCredentials(newCredentials))
+				{
+					_logger.Error("Could not persist the Twitch credentials obtained from the authorization code. This session will be lost on restart");
+				}
 
 				try
 				{
-					await ValidateAccessToken(newCredentials).ConfigureAwait(false);
+					await ValidateAccessToken(newCredentials, resetDataOnFailure: false).ConfigureAwait(false);
 				}
 				catch (Exception ex) when (ex is HttpRequestException || ex is OperationCanceledException || ex is JsonException)
 				{
@@ -556,8 +658,8 @@ namespace CatCore.Services.Twitch
 			}
 			catch (OperationCanceledException ex)
 			{
-				_logger.Warning(ex, "Exchanging the authorization code through the CatCore auth back-end timed out");
-				return BackendCallOutcome.Unavailable;
+				_logger.Warning(ex, "Exchanging the authorization code through the CatCore auth back-end timed out; the code may already be consumed");
+				return BackendCallOutcome.Unknown;
 			}
 			catch (JsonException ex)
 			{
@@ -617,6 +719,21 @@ namespace CatCore.Services.Twitch
 			       || (int)statusCode == 429;
 		}
 
+		private static bool IsTransientValidationFailure(HttpStatusCode statusCode)
+		{
+			return (int)statusCode >= 500 || statusCode == HttpStatusCode.RequestTimeout || (int)statusCode == 429;
+		}
+
+		private static bool IsBackendPermanentFailureStatusCode(HttpStatusCode statusCode)
+		{
+			// The auth back-end signals a rejected code/token with 400/401/403. A 404 means the
+			// route is not deployed or the URI is misconfigured, which is an availability problem
+			// and must not discard otherwise valid credentials.
+			return statusCode == HttpStatusCode.BadRequest
+			       || statusCode == HttpStatusCode.Unauthorized
+			       || statusCode == HttpStatusCode.Forbidden;
+		}
+
 		/// <summary>
 		/// Starts a Twitch device code grant authorization. This is a public client flow: it only
 		/// uses the client id and never a client secret, so it works without the CatCore auth
@@ -625,84 +742,117 @@ namespace CatCore.Services.Twitch
 		/// <returns>The Twitch activation URL to send the user to, or <c>null</c> when the flow could not be started.</returns>
 		private async Task<string?> StartDeviceCodeAuthorization()
 		{
-			lock (_deviceAuthorizationStateLock)
-			{
-				if (_pendingDeviceAuthorization != null && _pendingDeviceAuthorization.ExpiresAt > DateTimeOffset.Now)
-				{
-					return _pendingDeviceAuthorization.VerificationUri;
-				}
-			}
-
-			CancelPendingDeviceAuthorization();
-
+			// Serialize the start so a double click cannot create two device codes and two pollers.
+			await _deviceAuthorizationStartLocker.WaitAsync().ConfigureAwait(false);
 			try
 			{
-				using var requestMessage = new HttpRequestMessage(HttpMethod.Post, $"{TWITCH_AUTH_BASEURL}device")
-				{
-					Content = new FormUrlEncodedContent(new Dictionary<string, string>
-					{
-						["client_id"] = _constants.TwitchClientId,
-						["scopes"] = string.Join(" ", _twitchAuthorizationScope.Concat(_twitchOptionalAuthorizationScope))
-					})
-				};
-				using var responseMessage = await _twitchAuthClient
-					.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead)
-					.ConfigureAwait(false);
-
-				if (!responseMessage.IsSuccessStatusCode)
-				{
-					_logger.Warning("Starting the local Twitch device code authorization resulted in non-success status code: {StatusCode}", responseMessage.StatusCode);
-					return null;
-				}
-
-				var deviceAuthorization = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.DeviceAuthorizationResponse).ConfigureAwait(false);
-				if (string.IsNullOrWhiteSpace(deviceAuthorization.DeviceCode) || string.IsNullOrWhiteSpace(deviceAuthorization.UserCode))
-				{
-					_logger.Warning("The local Twitch device code authorization response did not contain a usable device or user code");
-					return null;
-				}
-
-				var verificationUri = string.IsNullOrWhiteSpace(deviceAuthorization.VerificationUri)
-					? DEVICE_VERIFICATION_BASEURL + Uri.EscapeDataString(deviceAuthorization.UserCode)
-					: deviceAuthorization.VerificationUri;
-				var expiresInSeconds = deviceAuthorization.ExpiresInRaw > 0 ? deviceAuthorization.ExpiresInRaw : DEVICE_CODE_DEFAULT_EXPIRES_IN_SECONDS;
-				var intervalSeconds = deviceAuthorization.IntervalRaw > 0 ? deviceAuthorization.IntervalRaw : DEVICE_CODE_DEFAULT_INTERVAL_SECONDS;
-				var pendingDeviceAuthorization = new PendingDeviceAuthorizationState(deviceAuthorization.DeviceCode, deviceAuthorization.UserCode, verificationUri,
-					DateTimeOffset.Now.AddSeconds(expiresInSeconds), intervalSeconds);
-
-				var cancellationTokenSource = new CancellationTokenSource();
 				lock (_deviceAuthorizationStateLock)
 				{
-					_pendingDeviceAuthorization = pendingDeviceAuthorization;
-					_deviceAuthorizationCancellationTokenSource = cancellationTokenSource;
+					if (_pendingDeviceAuthorization != null && _pendingDeviceAuthorization.ExpiresAt > DateTimeOffset.Now)
+					{
+						return _pendingDeviceAuthorization.VerificationUri;
+					}
 				}
 
-				_ = Task.Run(() => PollDeviceCodeAuthorization(pendingDeviceAuthorization, cancellationTokenSource));
+				// Switching to the local flow invalidates any authorization-code flow that was
+				// started earlier and never completed.
+				ClearPendingAuthorizationState();
+				CancelPendingDeviceAuthorization();
+				lock (_deviceAuthorizationStateLock)
+				{
+					_lastDeviceAuthorizationError = null;
+				}
 
-				_logger.Information("Started the local Twitch device code authorization flow. User code: {UserCode}", pendingDeviceAuthorization.UserCode);
-				return verificationUri;
+				try
+				{
+					using var requestMessage = new HttpRequestMessage(HttpMethod.Post, $"{TWITCH_AUTH_BASEURL}device")
+					{
+						Content = new FormUrlEncodedContent(new Dictionary<string, string>
+						{
+							["client_id"] = _constants.TwitchClientId,
+							["scopes"] = string.Join(" ", _twitchAuthorizationScope.Concat(_twitchOptionalAuthorizationScope))
+						})
+					};
+					// Bound this request: the local API handles requests sequentially, so a stalled
+					// device authorization must not block the portal for HttpClient's default timeout.
+					using var requestCancellationTokenSource = new CancellationTokenSource(DEVICE_AUTHORIZATION_REQUEST_TIMEOUT);
+					using var responseMessage = await _twitchAuthClient
+						.SendAsync(requestMessage, requestCancellationTokenSource.Token)
+						.ConfigureAwait(false);
+
+					if (!responseMessage.IsSuccessStatusCode)
+					{
+						_logger.Warning("Starting the local Twitch device code authorization resulted in non-success status code: {StatusCode}", responseMessage.StatusCode);
+						return null;
+					}
+
+					var deviceAuthorization = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.DeviceAuthorizationResponse).ConfigureAwait(false);
+					if (string.IsNullOrWhiteSpace(deviceAuthorization.DeviceCode) || string.IsNullOrWhiteSpace(deviceAuthorization.UserCode))
+					{
+						_logger.Warning("The local Twitch device code authorization response did not contain a usable device or user code");
+						return null;
+					}
+
+					var verificationUri = IsTrustedDeviceVerificationUri(deviceAuthorization.VerificationUri)
+						? deviceAuthorization.VerificationUri
+						: DEVICE_VERIFICATION_BASEURL + Uri.EscapeDataString(deviceAuthorization.UserCode);
+					var expiresInSeconds = deviceAuthorization.ExpiresInRaw > 0 ? deviceAuthorization.ExpiresInRaw : DEVICE_CODE_DEFAULT_EXPIRES_IN_SECONDS;
+					var intervalSeconds = deviceAuthorization.IntervalRaw > 0 ? deviceAuthorization.IntervalRaw : DEVICE_CODE_DEFAULT_INTERVAL_SECONDS;
+					var pendingDeviceAuthorization = new PendingDeviceAuthorizationState(deviceAuthorization.DeviceCode, deviceAuthorization.UserCode, verificationUri,
+						DateTimeOffset.Now.AddSeconds(expiresInSeconds), intervalSeconds);
+
+					var cancellationTokenSource = new CancellationTokenSource();
+					lock (_deviceAuthorizationStateLock)
+					{
+						_pendingDeviceAuthorization = pendingDeviceAuthorization;
+						_deviceAuthorizationCancellationTokenSource = cancellationTokenSource;
+					}
+
+					_ = Task.Run(() => PollDeviceCodeAuthorization(pendingDeviceAuthorization, cancellationTokenSource));
+
+					_logger.Information("Started the local Twitch device code authorization flow. User code: {UserCode}", pendingDeviceAuthorization.UserCode);
+					return verificationUri;
+				}
+				catch (HttpRequestException ex)
+				{
+					_logger.Warning(ex, "An error occurred while trying to start the local Twitch device code authorization");
+					return null;
+				}
+				catch (OperationCanceledException ex)
+				{
+					_logger.Warning(ex, "Starting the local Twitch device code authorization timed out");
+					return null;
+				}
+				catch (JsonException ex)
+				{
+					_logger.Warning(ex, "The local Twitch device code authorization response could not be deserialized");
+					return null;
+				}
 			}
-			catch (HttpRequestException ex)
+			finally
 			{
-				_logger.Warning(ex, "An error occurred while trying to start the local Twitch device code authorization");
-				return null;
+				_deviceAuthorizationStartLocker.Release();
 			}
-			catch (OperationCanceledException ex)
-			{
-				_logger.Warning(ex, "Starting the local Twitch device code authorization timed out");
-				return null;
-			}
-			catch (JsonException ex)
-			{
-				_logger.Warning(ex, "The local Twitch device code authorization response could not be deserialized");
-				return null;
-			}
+		}
+
+		/// <summary>
+		/// Only the official Twitch activation pages are allowed as redirect targets. The URI is
+		/// supplied by Twitch, but validating it keeps a malformed or compromised response from
+		/// sending the browser (or the portal link) to an arbitrary host.
+		/// </summary>
+		private static bool IsTrustedDeviceVerificationUri(string? verificationUri)
+		{
+			return Uri.TryCreate(verificationUri, UriKind.Absolute, out var uri)
+			       && string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)
+			       && (string.Equals(uri.Host, "twitch.tv", StringComparison.OrdinalIgnoreCase)
+			           || string.Equals(uri.Host, "www.twitch.tv", StringComparison.OrdinalIgnoreCase));
 		}
 
 		private async Task PollDeviceCodeAuthorization(PendingDeviceAuthorizationState pendingDeviceAuthorization, CancellationTokenSource cancellationTokenSource)
 		{
 			var cancellationToken = cancellationTokenSource.Token;
 			var pollInterval = TimeSpan.FromSeconds(Math.Max(1, pendingDeviceAuthorization.IntervalSeconds));
+			var lastTransientError = "none";
 
 			try
 			{
@@ -735,12 +885,21 @@ namespace CatCore.Services.Twitch
 							// Persist immediately. Twitch invalidates the previous refresh token as soon
 							// as it issues a new one, so losing the new pair would force a new login.
 							_scopeMismatchDetected = false;
-							UpdateCredentials(newCredentials);
+							lock (_deviceAuthorizationStateLock)
+							{
+								_lastDeviceAuthorizationError = null;
+							}
+
+							if (!UpdateCredentials(newCredentials))
+							{
+								_logger.Error("Could not persist the locally obtained Twitch credentials. This session will be lost on restart");
+							}
+
 							_logger.Information("The local Twitch device code authorization completed successfully");
 
 							try
 							{
-								await ValidateAccessToken(newCredentials).ConfigureAwait(false);
+								await ValidateAccessToken(newCredentials, resetDataOnFailure: false).ConfigureAwait(false);
 							}
 							catch (Exception ex) when (ex is HttpRequestException || ex is OperationCanceledException || ex is JsonException)
 							{
@@ -751,16 +910,30 @@ namespace CatCore.Services.Twitch
 						case DeviceCodePollOutcome.AuthorizationPending:
 							continue;
 						case DeviceCodePollOutcome.SlowDown:
-							pollInterval += TimeSpan.FromSeconds(DEVICE_CODE_SLOW_DOWN_INCREMENT_SECONDS);
-							_logger.Verbose("Twitch asked CatCore to slow down the local device code polling to {Interval}", pollInterval);
+						case DeviceCodePollOutcome.TransientFailure:
+							// A slow-down request or a temporary network error must not kill the flow
+							// while the device code is still valid; back off but keep polling.
+							lastTransientError = pollResult.ErrorMessage ?? "temporary failure";
+							pollInterval = TimeSpan.FromSeconds(Math.Min(pollInterval.TotalSeconds + DEVICE_CODE_SLOW_DOWN_INCREMENT_SECONDS, 60));
+							_logger.Verbose("Backing off the local Twitch device code polling to {Interval} after a temporary failure or slow-down request", pollInterval);
 							continue;
 						default:
+							lock (_deviceAuthorizationStateLock)
+							{
+								_lastDeviceAuthorizationError = pollResult.ErrorMessage ?? "the authorization was rejected";
+							}
+
 							_logger.Warning("The local Twitch device code authorization failed: {Error}", pollResult.ErrorMessage);
 							return;
 					}
 				}
 
-				_logger.Warning("The local Twitch device code authorization expired before the user authorized it");
+				lock (_deviceAuthorizationStateLock)
+				{
+					_lastDeviceAuthorizationError = $"the authorization did not complete in time (last polling error: {lastTransientError})";
+				}
+
+				_logger.Warning("The local Twitch device code authorization expired: {Error}", _lastDeviceAuthorizationError);
 			}
 			catch (OperationCanceledException)
 			{
@@ -790,14 +963,17 @@ namespace CatCore.Services.Twitch
 						["grant_type"] = DEVICE_CODE_GRANT_TYPE
 					})
 				};
-				using var responseMessage = await _twitchAuthClient.SendAsync(requestMessage, cancellationToken).ConfigureAwait(false);
+				using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+				requestTimeout.CancelAfter(DEVICE_AUTHORIZATION_REQUEST_TIMEOUT);
+				using var responseMessage = await _twitchAuthClient.SendAsync(requestMessage, requestTimeout.Token).ConfigureAwait(false);
 				var responseBody = await responseMessage.Content.ReadAsStringAsync().ConfigureAwait(false);
 
 				if (responseMessage.IsSuccessStatusCode)
 				{
 					var authorizationResponse = JsonSerializer.Deserialize(responseBody, TwitchAuthSerializerContext.Default.AuthorizationResponse);
 					return string.IsNullOrWhiteSpace(authorizationResponse.AccessToken)
-						? DeviceCodePollResult.Failed("The token response did not contain an access token")
+					       || string.IsNullOrWhiteSpace(authorizationResponse.RefreshToken)
+						? DeviceCodePollResult.Failed("The token response did not contain a complete token pair")
 						: DeviceCodePollResult.Authorized(authorizationResponse);
 				}
 
@@ -811,7 +987,21 @@ namespace CatCore.Services.Twitch
 							return DeviceCodePollResult.SlowDown();
 					}
 
+					if ((int)responseMessage.StatusCode >= 500
+					    || responseMessage.StatusCode == HttpStatusCode.RequestTimeout
+					    || (int)responseMessage.StatusCode == 429)
+					{
+						return DeviceCodePollResult.TransientFailure($"Twitch returned status code {responseMessage.StatusCode}");
+					}
+
 					return DeviceCodePollResult.Failed(errorMessage!);
+				}
+
+				if ((int)responseMessage.StatusCode >= 500
+				    || responseMessage.StatusCode == HttpStatusCode.RequestTimeout
+				    || (int)responseMessage.StatusCode == 429)
+				{
+					return DeviceCodePollResult.TransientFailure($"Twitch returned status code {responseMessage.StatusCode}");
 				}
 
 				return DeviceCodePollResult.Failed($"Twitch returned status code {responseMessage.StatusCode}");
@@ -820,9 +1010,11 @@ namespace CatCore.Services.Twitch
 			{
 				throw;
 			}
-			catch (Exception ex) when (ex is HttpRequestException || ex is JsonException || ex is TaskCanceledException)
+			catch (Exception ex) when (ex is HttpRequestException || ex is JsonException || ex is OperationCanceledException)
 			{
-				return DeviceCodePollResult.Failed(ex.Message);
+				// Temporary transport, timeout or body errors: the device code may still be usable.
+				_logger.Warning("Temporary failure while polling Twitch for the device code authorization: {Message}", ex.Message);
+				return DeviceCodePollResult.TransientFailure(ex.Message);
 			}
 		}
 
@@ -895,14 +1087,25 @@ namespace CatCore.Services.Twitch
 
 			if (!responseMessage.IsSuccessStatusCode)
 			{
-				if (resetDataOnFailure)
+				var isTransient = IsTransientValidationFailure(responseMessage.StatusCode);
+				if (resetDataOnFailure || !isTransient)
 				{
-					UpdateCredentials(TwitchCredentials.Empty());
-					_loggedInUser = null;
-					CancelForcedRefresh();
-				}
+					if (resetDataOnFailure)
+					{
+						UpdateCredentials(TwitchCredentials.Empty());
+						_loggedInUser = null;
+						CancelForcedRefresh();
+					}
 
-				Status = AuthenticationStatus.Unauthorized;
+					Status = AuthenticationStatus.Unauthorized;
+				}
+				else
+				{
+					// A fresh token pair is already persisted: a temporary /validate failure must
+					// not report a logout or stop the refresh schedule.
+					_logger.Warning("Twitch token validation returned a temporary status {StatusCode}; keeping the current session", responseMessage.StatusCode);
+					ScheduleForcedRefresh();
+				}
 
 				return null;
 			}
@@ -986,7 +1189,13 @@ namespace CatCore.Services.Twitch
 				}
 
 				_logger.Warning("The local Twitch token refresh was rejected; trying the CatCore auth back-end as a last resort");
-				return await RefreshTokensThroughBackend().ConfigureAwait(false) == BackendCallOutcome.Success;
+				var fallbackOutcome = await RefreshTokensThroughBackend().ConfigureAwait(false);
+				if (fallbackOutcome == BackendCallOutcome.Rejected)
+				{
+					MarkReauthorizationRequired();
+				}
+
+				return fallbackOutcome == BackendCallOutcome.Success;
 			}
 
 			_logger.Information("Refreshing tokens using secure CatCore auth back-end");
@@ -994,6 +1203,12 @@ namespace CatCore.Services.Twitch
 			if (backendOutcome == BackendCallOutcome.Success)
 			{
 				return true;
+			}
+
+			if (backendOutcome == BackendCallOutcome.Rejected)
+			{
+				MarkReauthorizationRequired();
+				return false;
 			}
 
 			_logger.Warning("The CatCore auth back-end could not refresh the tokens ({Outcome}). Attempting a local refresh without a client secret", backendOutcome);
@@ -1004,6 +1219,18 @@ namespace CatCore.Services.Twitch
 
 			_logger.Error("Refreshing the Twitch tokens failed both through the CatCore auth back-end and locally. Re-authorize to obtain a locally refreshable token, or restore connectivity to the CatCore auth back-end");
 			return false;
+		}
+
+		private void MarkReauthorizationRequired()
+		{
+			_logger.Error("The refresh token was rejected permanently; the user has to authorize CatCore again");
+			// Keep the stored token pair. The back-end can only tell us that a refresh was
+			// rejected, not whether the underlying token is still usable; destroying the only
+			// local copy would turn a transient back-end problem into a permanent logout.
+			_loggedInUser = null;
+			_scopeMismatchDetected = false;
+			CancelForcedRefresh();
+			Status = AuthenticationStatus.Unauthorized;
 		}
 
 		private async Task<BackendCallOutcome> RefreshTokensThroughBackend()
@@ -1021,18 +1248,30 @@ namespace CatCore.Services.Twitch
 					return BackendCallOutcome.Unavailable;
 				}
 
-				var encodedRefreshToken = Uri.EscapeDataString(refreshTokenBeforeRefresh);
-				using var responseMessage = await _catCoreAuthClient
-					.PostAsync(BuildAuthBackendUri($"api/twitch/refresh?refresh_token={encodedRefreshToken}"), null)
+				using var responseMessage = await _exceptionRetryPolicy.ExecuteAsync(async () =>
+					{
+						using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+						{
+							["refresh_token"] = refreshTokenBeforeRefresh!
+						});
+						return await _catCoreAuthClient.PostAsync(BuildAuthBackendUri("api/twitch/refresh"), content).ConfigureAwait(false);
+					})
 					.ConfigureAwait(false);
 
 				if (!responseMessage.IsSuccessStatusCode)
 				{
 					_logger.Warning("Refreshing tokens through the CatCore auth back-end resulted in non-success status code: {StatusCode}", responseMessage.StatusCode);
-					return BackendCallOutcome.Unavailable;
+					return IsBackendPermanentFailureStatusCode(responseMessage.StatusCode)
+						? BackendCallOutcome.Rejected
+						: BackendCallOutcome.Unavailable;
 				}
 
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
+				if (string.IsNullOrWhiteSpace(authorizationResponse.AccessToken) || string.IsNullOrWhiteSpace(authorizationResponse.RefreshToken))
+				{
+					_logger.Error("The CatCore auth back-end returned an incomplete token pair during refresh");
+					return BackendCallOutcome.Unavailable;
+				}
 
 				if (!string.Equals(Credentials.RefreshToken, refreshTokenBeforeRefresh, StringComparison.Ordinal))
 				{
@@ -1045,10 +1284,16 @@ namespace CatCore.Services.Twitch
 				var refreshedCredentials = new TwitchCredentials(authorizationResponse, TwitchTokenSources.AuthBackend);
 				// Persist the rotated token pair immediately. Twitch may invalidate the previous refresh token
 				// as soon as it issues a new one, so losing the new pair would permanently log the user out.
-				UpdateCredentials(refreshedCredentials);
-				return await ValidateAccessTokenCore(refreshedCredentials).ConfigureAwait(false) != null
-					? BackendCallOutcome.Success
-					: BackendCallOutcome.Rejected;
+				if (!UpdateCredentials(refreshedCredentials))
+				{
+					_logger.Error("Could not persist the refreshed Twitch credentials. The new token pair only exists in memory and will be lost on restart");
+					return BackendCallOutcome.Unavailable;
+				}
+
+				// Validation is best-effort: a temporary /validate failure must not wipe or reject
+				// the freshly rotated token pair.
+				await ValidateAccessTokenCore(refreshedCredentials, resetDataOnFailure: false).ConfigureAwait(false);
+				return BackendCallOutcome.Success;
 			}
 			catch (HttpRequestException ex)
 			{
@@ -1102,6 +1347,11 @@ namespace CatCore.Services.Twitch
 				}
 
 				var authorizationResponse = await responseMessage.Content.ReadFromJsonAsync(TwitchAuthSerializerContext.Default.AuthorizationResponse).ConfigureAwait(false);
+				if (string.IsNullOrWhiteSpace(authorizationResponse.AccessToken) || string.IsNullOrWhiteSpace(authorizationResponse.RefreshToken))
+				{
+					_logger.Error("Twitch returned an incomplete token pair during the local refresh");
+					return false;
+				}
 
 				if (!string.Equals(Credentials.RefreshToken, refreshToken, StringComparison.Ordinal))
 				{
@@ -1111,8 +1361,14 @@ namespace CatCore.Services.Twitch
 				}
 
 				var refreshedCredentials = new TwitchCredentials(authorizationResponse, TwitchTokenSources.LocalDeviceCode);
-				UpdateCredentials(refreshedCredentials);
-				return await ValidateAccessTokenCore(refreshedCredentials).ConfigureAwait(false) != null;
+				if (!UpdateCredentials(refreshedCredentials))
+				{
+					_logger.Error("Could not persist the locally refreshed Twitch credentials. The new token pair only exists in memory and will be lost on restart");
+					return false;
+				}
+
+				await ValidateAccessTokenCore(refreshedCredentials, resetDataOnFailure: false).ConfigureAwait(false);
+				return true;
 			}
 			catch (HttpRequestException ex)
 			{
@@ -1134,8 +1390,10 @@ namespace CatCore.Services.Twitch
 		public async Task<bool> RevokeTokens()
 		{
 			CancelPendingDeviceAuthorization();
+			ClearPendingAuthorizationState();
 
-			if (string.IsNullOrWhiteSpace(Credentials.RefreshToken))
+			var refreshToken = Credentials.RefreshToken;
+			if (string.IsNullOrWhiteSpace(refreshToken))
 			{
 				return false;
 			}
@@ -1143,10 +1401,27 @@ namespace CatCore.Services.Twitch
 			try
 			{
 				using var responseMessage = await _exceptionRetryPolicy
-					.ExecuteAsync(() => _twitchAuthClient.PostAsync($"{TWITCH_AUTH_BASEURL}revoke?client_id={_constants.TwitchClientId}&token={Credentials.RefreshToken}", null))
+					.ExecuteAsync(async () =>
+					{
+						using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+						{
+							["client_id"] = _constants.TwitchClientId,
+							["token"] = refreshToken!
+						});
+						return await _twitchAuthClient.PostAsync($"{TWITCH_AUTH_BASEURL}revoke", content).ConfigureAwait(false);
+					})
 					.ConfigureAwait(false);
 
-				UpdateCredentials(TwitchCredentials.Empty());
+				if (!responseMessage.IsSuccessStatusCode)
+				{
+					_logger.Warning("Twitch token revocation failed with status code {StatusCode}; the token may still be valid on Twitch's side", responseMessage.StatusCode);
+				}
+
+				if (!UpdateCredentials(TwitchCredentials.Empty()))
+				{
+					_logger.Error("Could not persist the local logout. The credentials may reappear after a restart");
+				}
+
 				_loggedInUser = null;
 				_scopeMismatchDetected = false;
 				CancelForcedRefresh();
@@ -1161,11 +1436,20 @@ namespace CatCore.Services.Twitch
 			}
 		}
 
+		private void ClearPendingAuthorizationState()
+		{
+			lock (_authorizationStateLock)
+			{
+				_pendingAuthorizationState = null;
+			}
+		}
+
 		private enum BackendCallOutcome
 		{
 			Success,
 			Rejected,
-			Unavailable
+			Unavailable,
+			Unknown
 		}
 
 		private enum DeviceCodePollOutcome
@@ -1173,6 +1457,7 @@ namespace CatCore.Services.Twitch
 			Authorized,
 			AuthorizationPending,
 			SlowDown,
+			TransientFailure,
 			Failed
 		}
 
@@ -1197,6 +1482,9 @@ namespace CatCore.Services.Twitch
 
 			public static DeviceCodePollResult SlowDown() =>
 				new(DeviceCodePollOutcome.SlowDown, null, null);
+
+			public static DeviceCodePollResult TransientFailure(string errorMessage) =>
+				new(DeviceCodePollOutcome.TransientFailure, null, errorMessage);
 
 			public static DeviceCodePollResult Failed(string errorMessage) =>
 				new(DeviceCodePollOutcome.Failed, null, errorMessage);
